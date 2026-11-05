@@ -97,10 +97,14 @@ function orcaTab(args) {
   });
 }
 
-function orcaTabCreate(url) {
+function orcaTabCreate(url, worktreePath) {
+  // 显式 --worktree：不指定时 CLI 走“当前工作区”解析，在远程/非本机工作区
+  // 场景会挂起或落到错误宿主。失败时带回 stderr，供日志定位。
+  const args = ['tab', 'create', '--url', url, '--split', 'right'];
+  if (worktreePath) args.push('--worktree', `path:${worktreePath}`);
   return new Promise((resolve) => {
-    execFile(ORCA_BIN, ['tab', 'create', '--url', url, '--split', 'right'], { timeout: 8000 }, (err) => {
-      resolve(err ? err.message : null);
+    execFile(ORCA_BIN, args, { timeout: 8000 }, (err, stdout, stderr) => {
+      resolve(err ? `${err.message}${stderr ? ` :: ${String(stderr).slice(0, 200)}` : ''}` : null);
     });
   });
 }
@@ -344,7 +348,7 @@ function isInstalledPluginPath(target) {
     openEditors.set(root, { skill: skillId, url });
     orca.log(`Skill editor up: ${skillId} -> ${url}`);
 
-    const tabError = await orcaTabCreate(url);
+    const tabError = await orcaTabCreate(url, workspaceRoot || undefined);
     if (tabError) orca.log(`Browser tab create failed: ${tabError}`);
     return { ok: true, url, ...(tabError ? { tabError } : {}) };
   }
@@ -516,9 +520,21 @@ function isInstalledPluginPath(target) {
   // 点击时若缓存里已有库页 tab 直接 switch——完全绕开 tab list 挂起（实测重装重启瞬间
   // CLI 子进程可挂 8s）。switch 失败再回退 create。
   let cachedGalleryPageId = null;
+  let cachedPageWsRoot = ''; // 缓存归属的工作区：切工作区即失效
   let tabCacheTimer = null;
+  function tabListArgs() {
+    // 显式 --worktree：list/switch/create 都锚定当前焦点工作区，
+    // 避免“当前工作区”在远程/非本机场景解析挂起或落错宿主
+    return workspaceRoot
+      ? ['tab', 'list', '--json', '--worktree', `path:${workspaceRoot}`]
+      : ['tab', 'list', '--json'];
+  }
   async function refreshTabCache() {
-    const r = await orcaTab(['tab', 'list', '--json']);
+    if (cachedPageWsRoot !== (workspaceRoot || '')) {
+      cachedGalleryPageId = null;
+      cachedPageWsRoot = workspaceRoot || '';
+    }
+    const r = await orcaTab(tabListArgs());
     if (r.err) return;
     try {
       const tabs = JSON.parse(r.stdout).result?.tabs || [];
@@ -569,11 +585,13 @@ function isInstalledPluginPath(target) {
           }
           cachedGalleryPageId = null; // 缓存失效
         }
-        // 快路径②：现场 list（超时 3s），找到库页 tab 就 switch
+        // 快路径②：现场 list（超时 3s），找到库页 tab 就 switch；失败原因落日志
         try {
-          const listed = await orcaTab(['tab', 'list', '--json']);
+          const listed = await orcaTab(tabListArgs());
           lap('tab-list');
-          if (!listed.err) {
+          if (listed.err) {
+            orca.log(`gallery tab-list failed: ${listed.err.message || listed.err}${listed.stderr ? ` :: ${listed.stderr.slice(0, 160)}` : ''}`);
+          } else {
             const tabs = JSON.parse(listed.stdout).result?.tabs || [];
             const hit = tabs.find((t) => String(t.url || '').startsWith(GALLERY_URL));
             if (hit) {
@@ -584,11 +602,14 @@ function isInstalledPluginPath(target) {
             }
           }
         } catch { /* fall through to create */ }
-        // 最后一步：新建 tab（加载屏由库页自身展示）
-        const tabError = await orcaTabCreate(GALLERY_URL);
+        // 最后一步：新建 tab（加载屏由库页自身展示）；失败原因落日志供定位
+        const tabError = await orcaTabCreate(GALLERY_URL, workspaceRoot || undefined);
         if (!tabError) refreshTabCache().catch(() => {});
         lap('tab-create');
-        if (tabError) return { ok: false, error: tabError };
+        if (tabError) {
+          orca.log(`gallery tab-create failed: ${tabError}`);
+          return { ok: false, error: tabError };
+        }
         lastGalleryOpenAt = Date.now();
         return { ok: true, reused: false };
       } finally {
