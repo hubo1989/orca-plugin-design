@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+*.tmp
+*.log
+/*.proto.html
+!templates/
+
+# 本地设计项目数据（.design/ 草稿与 designs/ 历史快照），不发布
+.design/
+designs/
+dist/

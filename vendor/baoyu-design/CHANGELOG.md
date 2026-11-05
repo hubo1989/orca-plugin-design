@@ -1,0 +1,398 @@
+# Changelog
+
+English | [中文](./CHANGELOG.zh.md)
+
+All notable changes to `baoyu-design` are tracked in this file.
+
+## 2.9.0 - 2026-11-03
+
+### Features
+- **ChatGPT plugins.** The skills now also come as plugins for the ChatGPT desktop app and Codex: Baoyu Slides, Baoyu Canvas, Baoyu Design System, Baoyu Dashboard, Baoyu Motion (with `motion-director` and `dataviz`) and Baoyu Dataviz. This repository is their marketplace: run `codex plugin marketplace add JimLiu/baoyu-design --sparse .agents/plugins --sparse chatgpt-plugins`, then install the ones you want. [chatgpt-plugins/README.md](chatgpt-plugins/README.md) has the steps.
+- DeepSeek Harness: each deck, canvas, design system, dashboard and film on the **Artifacts** page now has a real thumbnail, taken from its own editor and retaken when its files change. This needs the desktop app; in `dsh web` a card keeps a drawn picture of its type.
+- The **Artifacts** page's tiles and **+** menu start a new session with the input filled in, such as `/claude-slides Make me a slide deck about: `, and sending it loads that skill. Only plugins that are on get a tile.
+- The **Artifacts** page has grid and list views, search, sorting (last opened, last edited, date created, name) and filters (type, date opened, sharing, pinned).
+- Each card on the **Artifacts** page has a menu to pin, rename, copy the link or delete. Rename changes the title in the artifact itself, so its editor shows the new name. Delete moves the folder to `baoyu-design/trash/` in the app's data folder, with an Undo; a folder that also holds other files stays where it is and only leaves the list.
+
+### Fixes
+- In a sandbox that blocks local network, such as Codex's default one, `open` said `PORT_IN_USE`, as if every port were taken. It now says `NETWORK_BLOCKED` and how to run the command, and the skills say which commands need local network.
+
+## 2.8.2 - 2026-11-02
+
+### Fixes
+- `claude-slides`: in a PowerPoint export, Chinese, Japanese or Korean text could show as boxes when its East Asian font was missing on the reader's computer or held none of those characters: Arial in the basic-fonts export, a Latin family, or an embedded subset that left characters out of a long deck. That text now names a font Windows and Office have instead (Microsoft YaHei, Microsoft JhengHei, Yu Gothic or Malgun Gothic). Text the embedded font holds, text without these characters and the Google Slides export are unchanged ([#29](https://github.com/JimLiu/baoyu-design/issues/29)).
+
+## 2.8.1 - 2026-11-02
+
+### Fixes
+- `claude-slides`, `claude-design`, `claude-design-system`, `claude-dashboard`: their descriptions no longer send one-off HTML work to the `baoyu-design` skill, which is archived and no longer installed. They now only say what each skill is not for. The DeepSeek Harness plugins carry the same descriptions.
+
+## 2.8.0 - 2026-11-02
+
+### Features
+- **Motion is released.** `claude-motion` makes animated films: the agent writes each scene as code into the film's folder while you watch it fill in the local player, then you retype lines, drag scene lengths, change the style in **Tweaks**, comment on a moment and send it to the agent, share it on the network and go back through its History. Export MP4 or GIF from the player, or `export` from the command line with Chrome, no page open.
+- Long narrated films: up to 900 s and 40 scenes, with a voice track of one take a scene. `voice` makes the takes with a speech provider of yours (`voice --providers` says which are ready), `--take` / `--takes` adopts ones made elsewhere, and `align`, `sync` and `beats` time scenes and motion to the words. Captions follow the voice, with CJK-aware line breaks, and `captions` or `export --captions` writes them as a subtitle file. A **Script** tab in the Tweaks panel edits the lines, and the voice lane draws each take's wave.
+- Sound and footage: `score` reports what the film plays and how loud it is, `S.bed` plays a recorded music bed under the film, `music` measures a track and `arrange` cuts one to the film, and `export --audio-only` renders the mix in seconds. `record` films a page of your own product as a clip (needs ffmpeg), `stills` gives the frames at chosen moments, and `import-explainer` brings an explainer project in as a film.
+- **`motion-director`** is a new skill that directs a film with something to say: it finds the point and the picture that carries it, writes the narration for the ear, has it voiced, times every scene to the words, reviews the frames as a viewer would, and hands the film over in its player. It needs `claude-motion` beside it.
+- DeepSeek Harness: the new `dsh-claude-motion` plugin. Comments and the player's **Continue**, **Finalize**, **Make the animation** and **Ask Agent** buttons reach the agent, and films are listed on the **Artifacts** page.
+- All the open artifacts of a kind now share one server and one port, instead of a port each: every page has its own address, such as `http://127.0.0.1:4710/slides/<id>/`, which stays the same from one start to the next. The server's root lists what is open, and the server ends with the last one. Sharing stays per artifact, and share links gain the same path, so links from an earlier version stop working.
+
+### Fixes
+- `share <root> --disable`, `--enable`, `--reset` and `--role` no longer open the page to the network. They used to turn sharing on whenever it was off, so disabling a link right after `--off` put the page back on the network. Only `share <root>` with no options opens it now; with no server running, the link options change the links without starting one.
+
+## 2.7.2 - 2026-11-02
+
+### Features
+- Slides and design: an installed design system now says when it has fallen behind the system it was copied from, and can be copied again. The **Theme** tab shows `Behind its source: N files changed` with a **Sync** button (the owner's), which updates the open page at once. `artifact.mjs ds-sync <root> [<folder>] [--check]` does the same from the command line, and `check` notes a copy that is behind. A system's new files are not copied, and a file it dropped stays in the copy ([#26](https://github.com/JimLiu/baoyu-design/issues/26)).
+- A source given as a relative path is found from the working directory, the artifact's folder and the folders above it, so the comparison also works in an editor reopened from another folder, such as the DeepSeek Harness **Artifacts** page. When the source cannot be found, the Theme tab says so.
+
+## 2.7.1 - 2026-11-02
+
+### Fixes
+- DeepSeek Harness: the **Artifacts** page and the comments wait no longer depend on how the agent spells the command. An `open` run through a shell variable (`"$SKILL/scripts/artifact.mjs" open …`), after a `cd`, or from the copy of the skill the workspace carries in `.agents/skills/` or `.dsh/skills/`, is now recorded and starts the comments wait. Before, none of these were, so the card never showed and **Send to Agent** comments went nowhere without a word ([#27](https://github.com/JimLiu/baoyu-design/issues/27)).
+- Running `open` again on an editor that is already running prints its `log` and `stop` lines, as the first `open` does.
+
+## 2.7.0 - 2026-11-02
+
+### Features
+- Share has an **Export** tab. It lists everything the page can be downloaded as, in rows with an icon and a description (slides: PDF, HTML, PNG, PPTX; design: Standalone page and the rest), with the owner's **Whole folder (.zip)** at the end. The design system and the dashboard, which had no local download button, get theirs here.
+- Download the whole artifact folder as a zip from every editor, or with `archive <root> [--out file.zip|dir]` from the command line. The zip leaves out the editor's own state, log, sharing file, `exports/`, temporary files and symlinks.
+- Slides and design: the **Theme** tab links to a read-only page for the design system in use, with its colours by theme, text styles, other tokens, components and guide. The page runs no script and reads nothing through a symlink.
+- The exported standalone HTML of a canvas follows links between artboards: a relative `<a href="B.dc.html">` opens the linked page in the same frame, and Back works ([#25](https://github.com/JimLiu/baoyu-design/issues/25)).
+- Slides HTML and PPTX exports and the design Standalone page carry the fonts in use. A family whose licence the lists cannot vouch for goes in with a note asking you to check it, and the file points at its licence page when one is known. PPTX embeds one subset file for a font cut into unicode-range blocks, and the font budget goes from 4 MiB to 16 MiB.
+- **Copy link** gives the address other people on the network can open, and shares the page on the network as it copies. A guest can pass the page on but not export it: no Export tab, no folder zip, no downloads.
+- A new project gets a default `.gitignore` the first time an editor opens it (state, log, sharing, `history/`, temporary files). An existing one is left alone. Each `SKILL.md` has a "Keeping it in git" section ([#24](https://github.com/JimLiu/baoyu-design/issues/24)).
+- Share: a Tailscale address is offered as a separate link, not as the main one, and the panel and `share` explain it is plain http and that a link is the permission.
+- DeepSeek Harness: an **Artifacts** page in the left sidebar lists every folder the agent opened an editor on, in cards tinted by type with a tab per type and search. A card opens its conversation and the editor in that conversation's Browser. All the plugins share the one entry.
+- DeepSeek Harness: downloads are saved. Its browser drops every download, so exports, and the folder zip now land in `exports/` in the project (never over an existing file), and a toast names the path.
+- The Artifacts sidebar icon is two overlapping cards, after claude.ai's.
+
+### Fixes
+- `claude-slides`: choosing **PDF** in the Download dialog crashed the page, and then its Download button did nothing. Both work.
+- A save that omits the version it started from is refused with a conflict when someone else has saved that path since, instead of silently overwriting.
+- `claude-dashboard`: when two pages create the same document, the second no longer replaces the first. Their fields are merged, and a value both set is recorded in History.
+- DeepSeek Harness: the comments wait starts, and the artifact is recorded, when the agent runs `open` after other script commands in the same shell call.
+
+### Documentation
+- The READMEs and each `SKILL.md` describe the Export tab, the folder zip, the Theme tab's design system page and Keeping it in git.
+
+## 2.6.1 - 2026-11-01
+
+### Fixes
+- `claude-dashboard`: when someone else saved the page while you were editing it, and you click **Save** after "This dashboard changed. Save to overwrite that change", it now counts as your choice, as **Keep mine** does in slides. History marks the version "Saved over <name>'s change", the other person's notice says you saved over their change (not that you changed it right after them), and you get no notice yourself. Edits to different lines are still merged and both kept, and **Bring back** still restores only the lines that were replaced.
+
+## 2.6.0 - 2026-11-01
+
+### Features
+- Version history in `claude-slides`, `claude-design`, `claude-design-system` and `claude-dashboard`: every change is kept as a version in the project's `history/` folder, with who made it (a guest by the name they typed, the owner, or **Agent** for a change made to the files on this computer). The **History** button, beside Share, lists the versions by day; open one to see what it changed line by line, preview the whole thing as it was, or restore all of it or one part as a new version.
+- When one person's save replaces another's change, the version records whose change it replaced and that person gets a notice with **Compare** and **Bring back**. Bring back puts back only what was replaced and leaves the other person's other changes.
+- Who is here: while others have the page open, their avatars sit beside History. In the slides and canvas editors each card says which slide or artboard the person is on and whether they are editing, and their cursors and selections show; when someone starts editing what you are looking at, you get a short note. Nothing is locked. The agent shows up there too for a short while after it changes the files.
+- Someone else's save updates your page in place in the slides, design and design-system editors, instead of reloading it.
+- Two people on the same slide, artboard or file: the two are merged first, element by element on a canvas and line by line in slides and design-system files (a token file token by token), so changes to different elements or lines both stay. Only when the merge cannot sort it out, such as both changing the same line, a bar asks whether to use theirs, keep yours, or keep both.
+- `claude-dashboard`: a write from the page merges with what others saved since, field by field and, for a page file, line by line; only a change to the same value gets a notice. Editing a page saves against the version the draft started from.
+- The agent is called **Agent**, with a robot avatar, in History, in the avatars and on the comment buttons (**Send to Agent**).
+
+### Fixes
+- `open` works beside a TUN-mode proxy, whose interface answered on every port and made `open` fail with `PORT_IN_USE`; share links leave out that interface's address ([#23](https://github.com/JimLiu/baoyu-design/issues/23)).
+- `comments --wait --timeout` no longer exits at random with `SERVER_GONE` ("The value of \"delay\" is out of range").
+- DeepSeek Harness plugins: the comments wait starts even when the agent runs `open` through shell variables, and a comment sent while the agent is still working waits until its turn is over instead of arriving mid-turn.
+
+### Documentation
+- Each editor's `SKILL.md` has a History section: where the versions are, what the notices mean, and how to read `history/index.json` when asked who changed something. The READMEs describe the history, the notices, who is here and the merging.
+
+## 2.5.0 - 2026-10-31
+
+### Features
+- Share on your local network: `claude-slides`, `claude-design`, `claude-design-system` and `claude-dashboard` open a project to the same Wi‑Fi or LAN. `share <root>` (or `open <root> --lan`) prints a link per role: `editor` edits and comments, `commenter` comments without editing, `viewer` only looks. Whoever opens a link types a name and is in; a save shows on every other open page, and each comment is its writer's own. The DeepSeek Harness plugins carry it too.
+- The owner, at this computer, gets a **Share** button after claude.ai's share dialog: who joined and who is online, a role menu and remove for each person, general access (only this computer, or anyone on the network with a link), and Copy, turn off and reset for each link. From the command line: `share <root> --disable <role>`, `--enable <role>`, `--reset <role>`, `--role <guest>=<role>` and `--off`.
+- Guests get a Share button too: the links they may pass on (their own role's and the ones below it) and Copy link for the page's address, which only people with access can open; anyone else gets a "No access" page.
+- Roles hold everywhere: commenters and viewers get the editor's read-only mode, viewers only read comments, only a message's author edits it, and only the owner sends comments to the agent. On a dashboard, the owner and editors write; commenters and viewers write nothing, their own `data/users` included.
+- Each skill's server has its own port: slides 4710, design 4720, design system 4730, dashboard 4740, or the next free one when that is taken. `--port n` starts from n, `--port 0` takes any free port.
+- `claude-design-system`: comments and Share sit in a bar across the top of the page, like claude.ai's artifact header.
+- `claude-dashboard`: the page is served at `/dashboard/<id>/`, an address that stays the same across restarts, so a tab left open never shows another folder that took the port.
+- The Share button takes the look of the bar it sits in, in light and dark.
+
+### Documentation
+- Each editor's `SKILL.md` has a Sharing section. The READMEs describe sharing on the local network and name the dashboard page among those with comments.
+
+## 2.4.1 - 2026-10-31
+
+### Features
+- `claude-dashboard`: comment on a chart, a number, a table or any part of the page, and tick **Send to agent**. New `comments`, `comment-reply` and `comment-resolve` commands; `comments --wait` prints the page's address and title. The `dsh-claude-dashboard` plugin waits for comments and shows a sent comment as a card in the chat.
+- `claude-slides`, `claude-design` and `claude-design-system`: on a page opened on its own, the comments button sits in the top-right toolbar.
+- The editors use claude.ai's current icon set.
+- DeepSeek Harness: a plugin market index for the **Discover** tab, at `https://jimliu.github.io/baoyu-design/dsh-plugins/index.json`, rebuilt after each release.
+
+### Fixes
+- `claude-dashboard`: the editor ships the licenses of its open-source packages in `scripts/editor/third-party-licenses.txt`, like the other editors.
+
+### Documentation
+- New `NOTICE.md` sets out the license of each part. The MIT License covers only the maintainer's own work. The material from Anthropic (skill text and references adapted from the Artifact types, `dataviz`, the editors reconstructed from claude.ai, the Anthropicons icon fonts, and the Claude Design prompt, built-in skills and starter components in `archive/`) stays Anthropic's and is not under MIT; the archived `frontend-design` skill is Apache 2.0, with its license beside it. Open-source code keeps its own licenses. `LICENSE`, the READMEs and every `SKILL.md` point to it, and the DeepSeek Harness plugins now ship it (`"license": "SEE LICENSE IN LICENSE"`).
+- The READMEs cover installing the DeepSeek Harness plugins from npm and from **Discover**.
+
+## 2.4.0 - 2026-10-30
+
+### Features
+- DeepSeek Harness plugins for the four editors, published to npm: `dsh-claude-slides`, `dsh-claude-design`, `dsh-claude-design-system` and `dsh-claude-dashboard`. In the app, open **Plugins** → **Add plugin** and enter a plugin's name. Each plugin carries its skill as this repo publishes it, prebuilt editor included; the folders are also in `dsh-plugins/`.
+- In the DeepSeek Harness plugins, the plugin waits for comments whenever the agent opens an editor, so **Send to agent** wakes the agent even when the chat is idle. A comment sent to the agent shows in the chat as a card, and **View thread** on the card opens the editor at that thread.
+- Comments: after a comment is sent to the agent, its thread opens and shows "Working…" until the agent replies. `?comment=<id>` in an editor's address opens that thread, and `comments --wait` also prints the editor's address and the artifact's title.
+- Comments: in the All comments panel, resolve and a more menu (Edit, Reopen, Delete thread) show when you hover a row and stay on the selected one; editing and the delete confirmation open in the row. Escape in a panel menu closes only the menu.
+
+### Documentation
+- `dsh-plugins/README.md`: installing by name, using, updating, uninstalling, and what to do when something doesn't work.
+
+### Maintenance
+- A version tag publishes the DeepSeek Harness plugins to npm from GitHub Actions.
+
+## 2.3.0 - 2026-10-30
+
+### Changed
+- Archive the `baoyu-design` skill: it moves from `skills/` to `archive/baoyu-design/`, so the `skills` CLI no longer installs it. The READMEs now cover the four artifact skills and `dataviz`.
+
+### Fixes
+- `claude-slides`: port the rest of the 2026-10-29 editor, including video embeds beyond YouTube, the Present menu, the phone landscape hint and the bottom toolbar; buttons and menus keep their spacing.
+- `claude-design-system`: add the new controls (2D color picker, segmented control, property rows, number input); the delete confirmation opens again.
+- `claude-dashboard`: port the 2026-10-29 page UI and messages, and editing the page by hand (Edit the page, Beta) on one-writer pages.
+- Comments: fix toast placement on right-to-left pages and the danger menu item highlight.
+
+### Documentation
+- Refresh the editor screenshots in the READMEs.
+
+## 2.1.0 - 2026-10-30
+
+### Features
+- `claude-slides`, `claude-design` and `claude-design-system`: leave comments on elements or areas in the editor. Comments are saved locally with their file and location; the agent can read, reply to, resolve and reopen threads. While an agent listens, a **Send to agent** checkbox lets you send a comment for it to act on.
+- Add `dataviz`, a chart-design skill for any output medium, with guidance on chart forms, color, marks, legends, accessibility and interaction, plus JavaScript and Python palette validators.
+- Refresh all four artifact editors to the 2026-10-29 upstream release, including the design canvas's Theme tab, read-only code-synced design systems, and updated font and icon assets.
+- `claude-slides`: decks opened on their own page gain additional export formats; PowerPoint export embeds linked Google Fonts, with WOFF2 decoding in the page.
+
+### Fixes
+- Editor servers exit with an error when their port is already in use instead of hanging.
+
+### Changed
+- Ship the artifact tools and editors prebuilt and remove the separate `tools/artifact-skills/` build tooling.
+- `claude-dashboard`: share server state and HTTP helpers with the other artifact servers.
+
+### Documentation
+- Sync the four artifact skills and their reference pages with the 2026-10-29 upstream instructions, covering design-system setup, slide links, canvas notes and dashboard data workflows.
+- Reorganize the English and Chinese READMEs around the skills, with editor screenshots, updated examples, dataviz and comments guidance, and a demo video in the Chinese README.
+
+## 2.0.3 - 2026-10-29
+
+### Fixes
+- `claude-design`: a page's phone version, the artboard beside the page at phone width, is now a 390×844 phone screen whose content scrolls inside the frame, so full-screen Fit shows it at its own size like a phone. Before, it took the page's full height, and Fit shrank it to a sliver.
+
+## 2.0.2 - 2026-10-28
+
+### Fixes
+- `claude-dashboard`: a dashboard's numbers, dates and state lines follow the person's language (in Chinese: 万/亿, `10月1日`, `加载失败`), and a title not in Latin letters gets a short English folder name.
+- `claude-dashboard`: dates not in ISO form, such as `Thu, Oct 29, 2026` in an X analytics export, are parsed as UTC with `d3.utcParse`, not `new Date()`, which shows them as the day before east of UTC.
+- `claude-dashboard`: a batch sent through a shell heredoc quotes its end marker (`<<'EOF'`); unquoted, the shell expands the `$file` in `{"$file": …}`.
+
+## 2.0.1 - 2026-10-28
+
+### Fixes
+- `claude-design-system`: a design system imported from a component library now gets live, interactive component previews instead of README-only or hand-drawn static cards. The agent takes every exported component, installs the package published on npm (`--ignore-scripts`, so none of the repository's code runs) and bundles it; the repository's own build is only for unpublished packages, and static previews are a labelled fallback.
+- `claude-design-system`: document libraries that need React 19 (ship `components/lib/react.js` and `react-dom.js`, listed in `libraries`), and that fonts from hosts other than Google Fonts, such as Typekit, fall back in previews.
+- `baoyu-design`: importing a design system keeps every path it reads or copies inside the design-system folder and the project; an `@import` or manifest entry that points outside, or a symlink leading out, is skipped and reported (#16).
+
+## 2.0.0 - 2026-10-28
+
+### Features
+- Add four skills that bring claude.ai's Artifact types to local agents: `claude-slides` (slide decks), `claude-design` (a canvas of artboards), `claude-design-system` (design systems) and `claude-dashboard` (data-backed dashboards). Each `SKILL.md` keeps the type's original instructions, with the Artifact tool calls swapped for a local `scripts/artifact.mjs` (Node 20+, the dashboard Node 22+; nothing to install).
+- Each skill ships its editor prebuilt in `scripts/editor/` and runs its own local server, so you and the agent can take turns: the agent's file writes show up in the editor at once, and edits made in the editor are saved back into the same files.
+- Decks and canvases can install a design system made with `claude-design-system`; the editor's Theme and color menus then offer its colors and text styles.
+- `claude-design` gets an Export button in the editor toolbar: export the whole design as a standalone HTML page, a PDF or PNG images. PDF and PNG first ask which artboards to include; PNG exports at 1× or 2×, and several artboards download as a .zip.
+- Add `tools/artifact-skills/` to rebuild the prebuilt editors.
+
+### Changed
+- `baoyu-design` now triggers only when a task creates or edits a visual deliverable. Architecture or protocol analysis, rendering-engine or backend work and technical Markdown no longer trigger it on their own.
+
+### Documentation
+- Document the four artifact skills, their `artifact.mjs` commands and the `claude-design` export in the English and Chinese READMEs.
+
+## 1.3.0 - 2026-09-23
+
+### Features
+- Synchronize the September 14 Claude Design snapshot: a new `watercolor-kit` starter paints deterministic, code-driven watercolors and replays them stroke by stroke, with matching watercolor components in `animations-v3` for painterly animation beats (plus a portable fallback when hosted painting tools are unavailable).
+- Absorb upstream guidance on GitHub sync receipts, minimum text contrast, and fluid layouts; PDF exports now rebuild the print copy from a fresh read of the design with optional source-version provenance.
+
+### Fixes
+- Soften mouse-wheel zoom on the design canvas: each wheel click now zooms 10% instead of ~20%, and zoom-vs-pan is decided once per scroll, so trackpad or Magic Mouse momentum can no longer blow the canvas up mid-pan.
+- Keep fit-mode `doc-page` content on a single printed sheet instead of spilling onto a second page.
+- Reject absolute asset paths when importing a design system, closing a path-traversal gap (by @anupamme)
+
+### Changed
+- Tweak-panel chat submissions are tagged as suggestion, free text, or ideas requests, and the suggestion bar reports a single impression per session.
+- Record the local design-canvas patch alongside the existing deck-stage patches so upstream syncs reapply it, with a test guarding it.
+
+### Documentation
+- Mention the watercolor painting runtime in the English and Chinese starter-component overviews.
+
+## 1.2.0 - 2026-07-25
+
+### Features
+- Synchronize 13 project-type routes and the July 25 Claude Design system-prompt snapshot, covering slides, mobile apps, wireframes, documents, animation, UI mockups, résumés, 3D objects, research, HTML email, color/type systems, diagrams, and fliers.
+- Add specialized workflows for 3D objects, data science and visualization, design feedback, experiments, HTML email, maps, social media campaigns, trifold brochures, watercolor illustration, web research, landing pages, and additional export formats.
+- Add starter components for timeline animation, charts and data overlays, document and file views, 3D scenes, browser/device shells, and major social platforms.
+
+### Changed
+- Merge upstream improvements into `deck-stage`, `image-slot`, design guidance, and project routing while preserving local native PowerPoint animations, tweak suggestions, design-system tooling, import flows, and video export.
+- Record reproducible upstream-sync provenance and manifests, with tests that verify every project type and protect local feature overlays.
+
+### Documentation
+- Expand the English and Chinese capability overview for the new workflows and starter components.
+
+## 1.1.1 - 2026-06-22
+
+### Changed
+- `make-a-deck`: clarify that text-capable image generation is not a reason to prefer it — HTML/CSS stays the default for structured and precise slide content, and generated imagery remains a supplement reserved for conceptual scenes, mascots, hero/section art, and genuine infographics (Chinese labels are welcome when an infographic is genuinely the right call).
+
+## 1.1.0 - 2026-06-22
+
+### Changed
+- `generate-images`: update raster image guidance for modern image backends that can render text reliably, including Chinese / CJK, and route text-heavy infographics to HTML/CSS only when editability, exactness, or data binding matters.
+- `make-a-deck`: align deck imagery guidance with text-capable image generation so generated slide infographics can include headings, labels, callouts, and Chinese copy when they do not need live editability or exact numeric binding.
+
+## 1.0.0 - 2026-06-22
+
+### Features
+- Ship the portable `baoyu-design` Agent Skill with the core design methodology, harness references for Claude Code, Cursor, and Codex, built-in design workflows, starter components, design-system tooling, and local import/export agents.
+- Add `release-skills`, a reusable release workflow for version selection, multi-language changelogs, annotated tags, and GitHub Releases.
+- Add local deck, document, PPTX, video, image-generation, Figma `.fig`, GitHub repo, HTML/CSS import, and design-system preview flows.
+
+### Fixes
+- `gen-pptx`: improve editable PowerPoint fidelity by rendering children in z-index order, propagating ancestor opacity through exported subtrees, rasterizing gradient overlays, preserving Unicode filenames, preserving line breaks, and guarding stuck captures with per-call timeouts.
+- `make-a-deck`: document full-height slide wrappers so full-bleed slide content exports reliably.
+
+### Documentation
+- Document installation, local usage, design systems, import sources, deck/PPTX export, and the supported agent harnesses in the English and Chinese READMEs.
+
+## 2026-06-19
+
+### Features
+- `generate-images`: add a harness-agnostic image-generation dispatcher and wire it into the design flows that need raster output. The dispatcher records prompt files before generation, chooses runtime-native providers before the installed `baoyu-image-gen` CLI, standardizes `imgs/` + `prompts/` outputs, and removes the obsolete `gemini-image` built-in skill.
+
+### Changed
+- PPTX export now defaults to editable mode; screenshot export remains available when explicitly requested.
+
+### Fixes
+- `make-a-deck`: document that each slide's content wrapper must fill its `<section>`. deck-stage sizes only the section (via `::slotted`), not the wrapper inside it, so a wrapper whose children are all absolutely positioned collapses to zero height — dropping full-bleed images entirely on export, or rendering hero backgrounds at half height. Adds a base CSS rule (`section[data-label] > *`), the mechanism behind it, and a verification check.
+- `gen-pptx` / `gen-video`: preserve Unicode characters (CJK, Cyrillic, accented Latin) in export filenames via a shared `safeBasename` sanitizer, instead of replacing every non-ASCII word character with `_` (which turned names like `小米SU7-外观与价格` into all underscores).
+- `gen-pptx`: rasterize CSS gradient backgrounds (cover/hero scrims, fade overlays) to transparent PNGs in editable PPTX export. PowerPoint has no gradient fill, so the converter previously flattened a gradient to its first color stop — turning an alpha-fading scrim like `linear-gradient(105deg, rgba(8,10,13,.92) → .05)` into a near-opaque dark rectangle that uniformly dimmed the whole image and hid the bright subject under the fade. The exporter now paints the gradient onto a canvas honoring each stop's alpha (linear + radial, angle / `to`-direction / corner, %/px stops, border-radius clipping), so overlays fade exactly as in the browser; unsupported forms (conic / repeating) fall back to the prior flat fill.
+
+## 2026-06-16
+
+### Features
+- `animated-video`: add a local `gen-video` CLI for MP4/WebM/GIF export. It drives Chromium with Playwright, seeks timeline animations frame by frame through `window.__animStage`, supersamples captures, and streams frames to ffmpeg.
+- `starter-components/animations.jsx`: add the `window.__animStage` timeline bridge and `?capture` behavior so exported animations start paused, render full-bleed, and omit editing chrome.
+
+### Fixes
+- `gen-pptx`: guard setup and capture calls with per-call timeouts so a stuck slide cannot hang export forever.
+- `gen-pptx`: preserve code-block line breaks and `<br>` elements in editable PPTX text export.
+
+### Documentation
+- README: document the deck/PPTX export workflow and add English/Chinese pipeline diagrams.
+
+## 2026-06-15
+
+### Features
+- `gen-pptx`: add a local PPTX exporter for Claude Code. The TypeScript CLI uses Playwright and PptxGenJS to export baoyu-design decks in editable or screenshot mode and prints structured validation output.
+- `deck-stage`: add native fullscreen support, auto-hide the thumbnail rail in Fullscreen API mode, add a fullscreen toolbar button plus `F` shortcut, and add a Duplicate slide action.
+- `deck-stage`: move rail mutations to a host-driven `dc-op` model while preserving standalone HTML fallback behavior.
+- `make-a-doc`: add a built-in skill for page-style, print-first documents.
+- `something-cool`: add the opt-in "show me something cool" flow with an upfront direction picker.
+- `tweaks-panel`: add `TweakSuggestionBar` so edit-mode tweak ideas can be dropped into the host chat composer.
+
+### Changed
+- Built-in skill prompts were refreshed across deck authoring, speaker notes, mobile prototypes, print/PDF export, handoff, PDF reading, visual design, animation, sound, Canva, and PPTX export flows.
+- `design-canvas`: persist and restore viewport pan/zoom, with a visibility backstop and wheel passthrough for nested deck rails.
+- `SKILL.md`: add PPT/PPTX/PowerPoint routing terms, scope PPTX export to baoyu-design decks only, and trim the skill description under the runtime description limit.
+
+### Fixes
+- `deck-stage`: force slide animations and transitions to their end state during print/PDF export so entrance states are not captured mid-animation.
+
+## 2026-06-11
+
+### Features
+- Add `import-from-github` and `import-from-html` built-in skills for treating repositories and existing HTML/CSS pages as design sources with provenance and content-is-data guardrails.
+- Design-system tooling now parses component prop contracts from `.d.ts` files, emits complete enum/default prop guidance into `_ds_prompt.md`, and detects risky top-level Babel globals such as `status`, `open`, and `location`.
+- Add a GitHub Actions test workflow and Node test coverage for the design-system, Figma import, preview, asset, and prompt tooling.
+
+### Fixes
+- `build-preview.mjs`: inline assets referenced from card scripts and JSX string literals so generated `preview.html` files no longer show broken images for script-side asset refs.
+- `fig-materialize.mjs`: map font weights with the ordered decoder table so Semi Bold, Extra Bold, Thin, and related weights materialize correctly.
+- `ds-prompt.mjs`: keep fenced JSX examples complete when extracting component prompt excerpts.
+
+### Documentation
+- README: add an "Import design sources" section covering offline Figma `.fig` files, GitHub repositories, and existing HTML/CSS references.
+
+## 2026-06-10
+
+### Features
+- Add a local offline Figma `.fig` importer with `outline`, `mount`, `materialize`, `render`, and `design-system` subcommands.
+- Add the `design-system-preview` built-in skill and `agents/build-preview.mjs`, generating a self-contained interactive `preview.html` for compiled design systems.
+
+### Changed
+- `.fig` importer output now prints copy-pasteable next-step commands, warns about case-insensitive filename collisions, and records mount/render guidance in generated README files.
+- Design-system preview summaries are capped for very large systems so validation output stays readable.
+
+### Fixes
+- Design-system bundles now emit sources in dependency-safe order so local component dependencies are defined before consumers load.
+- Token extraction no longer misreads BEM pseudo-class selectors as custom-property declarations.
+- Preview fallback messages now distinguish a missing manifest from a manifest with no usable preview entries.
+
+## 2026-06-09
+
+### Features
+- Add end-to-end design-system support: discovery, project binding, `_ds/<slug>/` sync, generated per-load `_ds_prompt.md`, and project metadata recorded in `_d_meta.json`.
+- Add the read-only fork-verifier subagent for post-build checks across Claude Code, Codex, and Cursor harnesses.
+- Design-system prompts now use bundle-first wiring, include component prompt excerpts, and expose PascalCase `.jsx`/`.tsx` exports without `.d.ts` contracts when safe.
+
+### Changed
+- Expand design-system authoring guidance for GitHub source import, component imports, accepted global CSS entry names, and runtime wiring.
+- Shorten the `baoyu-design` skill description while preserving trigger terms (by @easonshen90, [#8](https://github.com/JimLiu/baoyu-design/pull/8)).
+
+### Credits
+- `baoyu-design` skill description shortening contributed by @easonshen90 ([#8](https://github.com/JimLiu/baoyu-design/pull/8)).
+
+## 2026-06-08
+
+### Features
+- Add the portable design-system authoring toolchain: compiler, checker, core parser, vendored Babel runtime, and a read-only checker subagent.
+- Add design-system consumer import/sync tooling, including `_ds/<slug>/` bindings, generated per-load prompts, and `_d_meta.json` project metadata.
+- Add asset recording tooling for tracking generated deliverables, versions, status, viewport, subtitles, and sections.
+
+### Changed
+- Harness references now point to the shared design-system authoring guide and clarify when to run checks inline versus through an isolated read-only subagent.
+
+### Fixes
+- Remove the tracked `skills/baoyu-design/.DS_Store` file (by @HCS9527, [#2](https://github.com/JimLiu/baoyu-design/pull/2)).
+
+### Credits
+- Tracked `.DS_Store` removal contributed by @HCS9527 ([#2](https://github.com/JimLiu/baoyu-design/pull/2)).
+
+## 2026-06-07
+
+### Fixes
+- `SKILL.md`: fix frontmatter metadata so the skill loads correctly (by @y122972, [#1](https://github.com/JimLiu/baoyu-design/pull/1)).
+- Remove the root `.DS_Store` file and add `.DS_Store` to `.gitignore`.
+- Correct README screenshot file mappings.
+
+### Documentation
+- Add screenshots to the English and Chinese READMEs, document Reader Mac App prompts and Claude Design comparison examples, and optimize screenshot assets to WebP.
+
+### Credits
+- `SKILL.md` frontmatter fix contributed by @y122972 ([#1](https://github.com/JimLiu/baoyu-design/pull/1)).
+
+## 2026-06-06
+
+### Features
+- Add the portable `baoyu-design` Agent Skill with core design methodology, built-in skill prompts, starter components, export/handoff flows, and Claude Code/Cursor harness references.
+- Add Codex Agent support with `skills/baoyu-design/references/codex.md`, covering question asking, browser preview, screenshots, debugging, deliverable surfacing, and subagent verification defaults.
+
+### Documentation
+- Add English and Simplified Chinese README files.
+- Add this changelog and clarify that final design/prototype delivery should surface the running preview, not only generated files.
+
+### Chore
+- Add initial repository files and MIT license.

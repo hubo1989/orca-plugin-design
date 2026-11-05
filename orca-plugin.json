@@ -1,0 +1,83 @@
+{
+  "manifestVersion": 2,
+  "id": "prototype-studio",
+  "name": "Prototype Studio",
+  "version": "0.1.0",
+  "execution": "trusted-worker",
+  "main": "src/worker.js",
+  "description": "Preview HTML prototypes in Orca's built-in browser with native DOM inspection, send-to-agent, and double-click copy editing.",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "id": "prototype.skill.claude-design",
+        "title": "Open Claude Design Editor",
+        "when": "workspace"
+      },
+      {
+        "id": "prototype.skill.claude-slides",
+        "title": "Open Claude Slides Editor",
+        "when": "workspace"
+      },
+      {
+        "id": "prototype.skill.claude-design-system",
+        "title": "Open Design System Editor",
+        "when": "workspace"
+      },
+      {
+        "id": "prototype.skill.claude-motion",
+        "title": "Open Claude Motion Editor",
+        "when": "workspace"
+      },
+      {
+        "id": "prototype.gallery",
+        "title": "Open Design Gallery",
+        "when": "workspace"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "gallery",
+        "text": "Design",
+        "icon": "layers",
+        "tone": "accent",
+        "tooltip": "Prototype Studio · 打开设计项目库",
+        "command": "prototype.gallery"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "prototype.gallery",
+        "key": "Mod+Alt+P",
+        "when": "workspace"
+      }
+    ],
+    "events": [
+      {
+        "on": "workspace.changed"
+      },
+      {
+        "on": "agent.status.changed"
+      }
+    ],
+    "newFiles": [
+      {
+        "id": "new-prototype",
+        "title": "HTML Prototype (.proto.html)",
+        "extension": ".proto.html",
+        "template": "templates/starter.proto.html"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "agent:read"
+    }
+  ]
+}

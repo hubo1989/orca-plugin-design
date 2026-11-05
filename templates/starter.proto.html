@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>产品原型设计</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --primary: #2563eb;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+    .container {
+      background: var(--card-bg);
+      border-radius: 16px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.02);
+      border: 1px solid var(--border);
+      width: 100%;
+      max-width: 800px;
+      padding: 36px;
+    }
+    .header {
+      margin-bottom: 28px;
+    }
+    .title {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      font-size: 15px;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .stat-card {
+      padding: 20px;
+      border-radius: 12px;
+      background: #f1f5f9;
+      border: 1px solid var(--border);
+    }
+    .stat-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+    .stat-val {
+      font-size: 28px;
+      font-weight: 700;
+      color: var(--primary);
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+    }
+    .btn {
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s ease;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      opacity: 0.9;
+    }
+    .btn-secondary {
+      background: transparent;
+      border-color: var(--border);
+      color: var(--text);
+    }
+    .btn-secondary:hover {
+      background: #f1f5f9;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1 class="title">全新AI原型工作台</h1>
+      <p class="subtitle">在画布中双击文案可直接原地修改，修改后实时写回本地 HTML 源码文件。</p>
+    </header>
+
+    <div class="grid">
+      <div class="stat-card">
+        <div class="stat-title">今日活跃用户</div>
+        <div class="stat-val">12,480</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">订单转化率</div>
+        <div class="stat-val">4.8%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-title">客户满意度</div>
+        <div class="stat-val">98.5%</div>
+      </div>
+      <div class="stat-card" style="padding:20px;border-radius:var(--radius, 12px);background:#f1f5f9;border:1px solid #e2e8f0;">
+  <div class="stat-title" style="font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">新增付费转化</div>
+  <div class="stat-val" style="font-size:28px;font-weight:700;color:var(--primary, #2563eb);display:flex;align-items:baseline;gap:8px;">
+    <span>3,280</span>
+    <span style="font-size:13px;font-weight:600;color:#10b981;">+24.6% ↑</span>
+  </div>
+</div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-secondary">取消</button>
+      <button class="btn btn-primary">确认保存</button>
+    </div>
+  </div>
+
+  <script>
+  // Prototype Studio Client Enhancement (Works even when opened directly via file://)
+  (function() {
+    const isFileProto = location.protocol === 'file:';
+    const serverOrigin = 'http://127.0.0.1:3456';
+    const fileName = location.pathname.split('/').pop() || 'starter.proto.html';
+
+    // 1. Show floating switcher pill if opened via file://
+    if (isFileProto) {
+      const pill = document.createElement('div');
+      pill.style.cssText = 'position:fixed;top:54px;right:24px;background:#1e293b;color:#f8fafc;display:flex;align-items:center;gap:12px;font-size:13px;font-family:sans-serif;z-index:999999;padding:10px 16px;border-radius:10px;border:1px solid rgba(255,255,255,0.2);box-shadow:0 10px 30px rgba(0,0,0,0.4);backdrop-filter:blur(10px);';
+      pill.innerHTML = '<span>🎨 <b>Prototype Studio:</b> 当前处于本地 file:// 查看模式</span>' +
+        '<a id="studioSwitchLink" href="' + serverOrigin + '/' + fileName + '" style="color:#ffffff;text-decoration:none;font-weight:600;background:#2563eb;padding:6px 12px;border-radius:6px;box-shadow:0 2px 6px rgba(37,99,235,0.4);display:inline-flex;align-items:center;gap:4px;">进入无限画布工作台 ➔</a>';
+      document.body.appendChild(pill);
+
+      // Check server health on 3456
+      fetch(serverOrigin + '/__api/status', { method: 'GET' })
+        .then(r => r.json())
+        .then(res => {
+          const link = document.getElementById('studioSwitchLink');
+          if (link && res?.ok) {
+            link.style.background = '#16a34a';
+          }
+        })
+        .catch(() => {
+          const link = document.getElementById('studioSwitchLink');
+          if (link) {
+            link.style.background = '#475569';
+            link.textContent = '3456 服务离线 (点击查看启动说明) ❓';
+            link.onclick = function(e) {
+              e.preventDefault();
+              alert('【Prototype Studio 提示】\n\n后台 3456 原型服务尚未启动。\n\n启动方式（无需快捷键）：\n1. 在 Orca 右侧边栏点击「🎨」图标展开 Prototype Studio 面板；\n2. 点击面板上的「打开无限画布工作台」按钮即可自动启动；\n3. 或在 Orca 内置终端中运行：node bin/preview.js');
+            };
+          }
+        });
+    }
+
+    // 2. Direct inline double-click editing
+    function isEditableLeaf(el) {
+      if (!el || ['INPUT', 'TEXTAREA', 'SELECT', 'SCRIPT', 'STYLE', 'BUTTON'].includes(el.tagName)) return false;
+      const text = el.innerText?.trim();
+      if (!text) return false;
+      const blockChildren = Array.from(el.children).filter(c => !['SPAN', 'B', 'STRONG', 'I', 'SMALL'].includes(c.tagName));
+      return blockChildren.length === 0;
+    }
+
+    document.addEventListener('dblclick', function(e) {
+      const target = e.target;
+      if (!isEditableLeaf(target)) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const original = target.innerText.trim();
+      target.setAttribute('contenteditable', 'plaintext-only');
+      target.style.outline = '2px solid #2563eb';
+      target.style.borderRadius = '4px';
+      target.focus();
+
+      function onDone() {
+        target.removeAttribute('contenteditable');
+        target.style.outline = '';
+        const updated = target.innerText.trim();
+        if (updated && updated !== original) {
+          fetch(serverOrigin + '/__api/edit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filePath: fileName,
+              oldText: original,
+              newText: updated,
+              tagName: target.tagName.toLowerCase()
+            })
+          }).then(r => r.json()).then(res => {
+            if (res.ok) console.log('[Prototype Studio] Auto saved to local file.');
+          }).catch(() => {});
+        }
+      }
+
+      target.addEventListener('keydown', function onKey(k) {
+        if (k.key === 'Enter') { k.preventDefault(); target.blur(); }
+      }, { once: true });
+      target.addEventListener('blur', onDone, { once: true });
+    }, true);
+  })();
+  </script>
+</body>
+</html>
