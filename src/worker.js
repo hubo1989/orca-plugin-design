@@ -392,6 +392,11 @@ function isInstalledPluginPath(target) {
       }
     }
     if (!base) return { ok: false, error: '当前工作区未识别：请让本工作区的 agent 产生一次状态事件，或稍后重试' };
+    // 远程/未挂载工作区护栏：路径在本机不可见时，服务扫不到、mkdirSync 还可能
+    // 在本机创建影子目录（写错盘）。明确拒绝而不是静默落到本机根路径。
+    if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
+      return { ok: false, error: `工作区路径在本机不可见（远程工作区或未挂载）：${base}。项目库目前仅支持本机工作区` };
+    }
     if (isInstalledPluginPath(base)) {
       return { ok: false, error: '当前工作区是 Orca 插件安装路径，请切换到其他工作区创建设计项目' };
     }
@@ -562,6 +567,12 @@ function isInstalledPluginPath(target) {
   }
   async function openGalleryTab() {
     if (galleryOpenInFlight) return galleryOpenInFlight;
+    // 远程工作区：路径本机不可见 → 服务扫不到任何项目，tab 操作也只会挂起/失败。
+    // 明确拒绝并给出原因，不浪费 3s 超时，也不开一个永远空的库页。
+    if (workspaceRoot && (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory())) {
+      orca.log(`gallery blocked: workspace not visible locally: ${workspaceRoot}`);
+      return { ok: false, error: `远程/本机不可见的工作区暂不支持项目库（仅支持本机工作区）：${workspaceRoot}` };
+    }
     // 节流只在“上次成功打开”后 2 秒内生效：失败后的立即重试不被吞掉
     if (Date.now() - lastGalleryOpenAt < 2000) return { ok: true, reused: true, throttled: true };
     const T0 = Date.now();
