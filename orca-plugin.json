@@ -33,6 +33,11 @@
         "when": "workspace"
       },
       {
+        "id": "prototype.skill.claude-dashboard",
+        "title": "Open Claude Dashboard Editor",
+        "when": "workspace"
+      },
+      {
         "id": "prototype.gallery",
         "title": "Open Design Gallery",
         "when": "workspace"

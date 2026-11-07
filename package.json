@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Prototype Studio custom editor plugin for Orca",
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test 'test/**/*.mjs'",
     "package": "bash bin/package.sh",
     "package:full": "bash bin/package.sh --full"
   },

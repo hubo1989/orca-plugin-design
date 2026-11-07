@@ -1,7 +1,17 @@
 #!/usr/bin/env node
 // 冒烟测试：用 mock host 激活 worker，触发 prototype.gallery 命令。
 // 验证 openGalleryTab 不再因 orcaTab 未定义抛 ReferenceError（即点击不再显示“运行失败”），
-// 且 2 秒节流（连点保护）生效。会真实调用 orca tab list/create —— tab create 是预期副作用。
+// 且 2 秒节流（连点保护）生效。
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+if (!process.env.ORCA_CLI_COMMAND) {
+  const mockCli = path.join(os.tmpdir(), 'mock-orca-cli.sh');
+  fs.writeFileSync(mockCli, '#!/bin/sh\nif [ "$1" = "tab" ] && [ "$2" = "list" ]; then echo \'{"result":{"tabs":[]}}\'; exit 0; fi\nif [ "$1" = "tab" ] && [ "$2" = "create" ]; then echo \'{"result":{"tabId":"mock"}}\'; exit 0; fi\necho \'{}\'\n', { mode: 0o755 });
+  process.env.ORCA_CLI_COMMAND = mockCli;
+}
+
 const workerUrl = new URL('../src/worker.js', import.meta.url);
 
 const handlers = new Map();
