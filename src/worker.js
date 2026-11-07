@@ -4,73 +4,22 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 
+import {
+  SKILLS,
+  SKILL_BY_ID,
+  ROOT_MARKERS,
+  EXAMPLE_TEMPLATES,
+  EXAMPLE_INDEX,
+} from './skills-meta.mjs';
+
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 
 const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
 
-// Design skills vendored from JimLiu/baoyu-design. Each ships a prebuilt artifact.mjs:
-//   list <dir>             find this type's artifact roots (prints a JSON array)
-//   open <root> --port n   start the editor server in the background, prints {"url"}
-//   stop <root>            stop the background editor server
-//   check <root>           validate a root, prints JSON with a problems count
+// Design skills vendored from JimLiu/baoyu-design.
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
-const SKILL_META = [
-  { id: 'claude-design', name: '画布', icon: '🎨', port: 3470 },
-  { id: 'claude-slides', name: '幻灯片', icon: '🖼️', port: 3471 },
-  { id: 'claude-design-system', name: '设计系统', icon: '🧩', port: 3473 },
-  { id: 'claude-motion', name: '动效影片', icon: '🎬', port: 3474 },
-];
-
-// Minimal example scaffolds, each validated with `artifact.mjs check` (problems == 0).
-// dashboard/motion have no static scaffold: their roots are created by agents
-// (dashboard via its doc files, motion via the editor's first write-db).
-const EXAMPLE_TEMPLATES = {
-  'claude-design': {
-    dirName: 'design-demo',
-    files: {
-      'project/canvas.json': (now) => JSON.stringify({
-        v: 3, createdOnFiles: { v: 1, at: now }, title: '示例画布', launch: { view: 'canvas' },
-        pages: [], boards: { 'Main.dc.html': { x: 0, y: 0, w: 880, h: 560, title: '欢迎' } },
-        order: ['Main.dc.html'], notes: {}, designSystems: [],
-      }),
-      'project/Main.dc.html':
-        '<!doctype html><html><head><meta charset="utf-8"><script src="./support.js"></script>'
-        + '<style>body{margin:0;font-family:-apple-system,sans-serif}'
-        + 'x-dc{display:block;width:880px;height:560px;background:#0ea5e9;color:#fff;'
-        + 'display:flex;align-items:center;justify-content:center}h1{font-size:64px}</style></head>'
-        + '<body><x-dc><h1>Hello Canvas</h1></x-dc>\n'
-        + '<script type="text/x-dc" data-dc-script data-props=\'{"$preview":{"width":880,"height":560}}\'>'
-        + 'class Component extends DCLogic {}</script>\n</body></html>',
-    },
-  },
-  'claude-slides': {
-    dirName: 'slides-demo',
-    files: {
-      'project/deck.json': (now) => JSON.stringify({
-        v: 4, createdOnFiles: { v: 1, at: now }, lists: 'css', title: '示例演示',
-        order: ['cover'], cover: 'cover', sections: {}, faces: {}, designSystems: [],
-      }),
-      'project/slides/cover.html':
-        '<section style="background:#1e293b;color:#fff;display:flex;align-items:center;'
-        + 'justify-content:center"><h1 style="font-size:96px;font-family:-apple-system,sans-serif">'
-        + '示例演示</h1></section>',
-    },
-  },
-  'claude-design-system': {
-    dirName: 'design-system-demo',
-    files: {
-      'project/design-system.json': (now) => JSON.stringify({
-        v: 3, layout: 'files', createdOnFiles: { v: 1, at: now }, title: '示例设计系统',
-        namespace: 'ExampleDesignSystem', libraries: [], sections: {}, groups: [],
-        assetGroups: {}, blobs: {}, docs: { readme: 'project/README.md', sections: [] },
-        lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Example scaffold' },
-      }),
-      'project/README.md': '# 示例设计系统\n\n由 Prototype Studio 创建的示例骨架。让工作区 agent 参考本目录继续完善。\n',
-      'project/tokens.json': '{}',
-    },
-  },
-};
+const SKILL_META = SKILLS;
 
 // Editors this worker started: root -> { skill, url }
 const openEditors = new Map();
@@ -273,16 +222,6 @@ function isInstalledPluginPath(target) {
     });
   }
 
-  // artifact.mjs's own `list` finds *design systems*, not per-type roots, so we scan
-  // marker files ourselves. dashboard/motion roots are created via write-db; their
-  // markers are best-effort guesses (index.json / scenes.json / voice.json).
-  const ROOT_MARKERS = {
-    'claude-design': ['project/canvas.json'],
-    'claude-slides': ['project/deck.json'],
-    'claude-design-system': ['project/design-system.json'],
-    'claude-motion': ['project/scenes.json', 'project/voice.json'],
-  };
-
   // 扫描指定工作区（深度 2，覆盖 designs/<proj> 与根级项目）。
   // root 为空时不扫描：绝不把别的目录当成“当前工作区”。
   function scanDesignProjects(rootDir) {
@@ -335,7 +274,7 @@ function isInstalledPluginPath(target) {
       root = roots[0].root;
     }
 
-    const r = await runNode([cli, 'open', root, '--port', String(meta.port)]);
+    const r = await runNode([cli, 'open', root]);
     if (r.err) return { ok: false, error: `artifact open failed: ${r.stderr || r.err.message}` };
     const m = r.stdout.match(/\{[\s\S]*"url"[\s\S]*\}/);
     if (!m) return { ok: false, error: `no url in artifact output: ${r.stdout.slice(0, 200)}` };
@@ -415,7 +354,13 @@ function isInstalledPluginPath(target) {
       for (const [rel, content] of Object.entries(tpl.files)) {
         const p = path.join(root, rel);
         fs.mkdirSync(path.dirname(p), { recursive: true });
-        fs.writeFileSync(p, typeof content === 'function' ? content(now) : content);
+        if (content === '__INDEX__') {
+          const idx = { ...EXAMPLE_INDEX[skillId], createdOnFiles: { v: 1, at: now }, title: name,
+            lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Example scaffold' } };
+          fs.writeFileSync(p, JSON.stringify(idx, null, 2));
+        } else {
+          fs.writeFileSync(p, typeof content === 'function' ? content(now) : content);
+        }
       }
     } catch (err) {
       return { ok: false, error: `项目写入失败（${err.code || ''} ${err.message}）：${root}` };
