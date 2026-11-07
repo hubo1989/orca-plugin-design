@@ -4,6 +4,65 @@ English | [中文](./CHANGELOG.zh.md)
 
 All notable changes to `baoyu-design` are tracked in this file.
 
+## 2.12.0 - 2026-11-06
+
+### Features
+- **Comments, in every editor, follow claude.ai's comment layer more closely.** A thread whose pin is out of the window gets a **More comments** tab with its count at that edge instead of a pin, and a click opens the nearest one. Pins on the same spot sit side by side. The **All comments** panel has **Send all to Agent**, which gives the agent every thread at once (`comments --wait` returns them together). An edited message says **edited**, a resolved thread says **Reply to reopen…**, and the panel has an empty state and, when the filter hides everything, **Show N resolved**.
+- **`claude-slides`, `claude-design`, `claude-design-system`, `claude-dashboard` and `claude-motion` follow claude.ai's 2026-11-05 update.** In all five: a button shows that it is working while its action runs, a dialog gives focus back to where it was, toasts can be reached from the keyboard, tabs have an underline style, and the icon set has 34 more icons. Properties can be copied and pasted in slides, design and the dashboard's edit mode.
+- `claude-slides`: speaker notes can be edited in the Canvas view, and the presentation has jump keys (Home, End).
+- `claude-design`: grid cells can be dragged and moved with the keyboard, and a tall artboard's PDF export is split across pages.
+- `claude-design-system`: a system holds up to 4,096 files a version, 4,080 of them its own (1,024 before), and `agent.md` and `gemini.md` are refused as file names, like `claude.md` and `agents.md`.
+- `claude-dashboard`: an attached file can be up to 15 MiB, a document written by the agent carries an `edit` stamp the page reads, and `check` knows the new rules for `dash/look`.
+- `claude-motion`: `check` warns about a module named `scene-…` or `layer-…`, which are the player's own names.
+
+### Documentation
+- Every editor's `SKILL.md` and reference follow the same update. `claude-slides` and `claude-design` choose typefaces from the brief and the subject, Inter with Space Grotesk when it is neutral. `claude-dashboard` has new looks and questions pages and reworked pages on data sources, features, design systems and reading aloud.
+- `claude-motion` is reworked: a new film is asked about before anything is made, a film left half-way is taken up again on a later turn instead of started over, a named design system is read before the first scene, and a few kinds of film are refused (for or against a political party, candidate or ballot measure; a promo for gambling or a crypto coin, token or exchange; a fight or combat scene). New reference pages cover each.
+
+## 2.11.1 - 2026-11-05
+
+### Features
+- **DeepSeek Harness: the Artifacts page offers the plugins you haven't installed.** Beside the tiles for the skills you have, each other baoyu-design plugin gets a dimmed tile marked **Not installed**. Click it to see what the plugin makes and install it from there, at the same version as the ones you have, usually without a restart. Once it's in, **Start** opens a session with the skill. In an app that can't install from the page, the tile points you to the Plugins page. A plugin you installed and switched off still gets no tile.
+
+### Fixes
+- With `--agent-hook`, a comment could reach the agent twice: a second send could start the hook again after the first run had finished but before the comment was marked sent.
+
+## 2.11.0 - 2026-11-05
+
+### Features
+- **DeepSeek Harness: a new version no longer pops up over the app.** The **Artifacts** row in the left sidebar gets an **Update** label instead (a dot on the icon, where a collapsed sidebar keeps its icons), and a panel at the top of the Artifacts page shows the versions, each plugin and what the release changes. **Update all** updates them together; **Update** on a plugin's line takes just that one. **Later** folds the panel to one line and removes the label until the next version.
+- While an update runs you can leave the Artifacts page: the label says **Updating**, **Failed** or **Restart**. **Try again** picks up where it stopped: the rest after **Update all**, that plugin after its own **Update**.
+- The **Update** button on a plugin's page now updates only that plugin, and a page that was open when its plugin was replaced comes back by itself.
+
+## 2.10.1 - 2026-11-05
+
+### Fixes
+- DeepSeek Harness 0.2.2 has its own plugin updates, so a plugin's page showed two update buttons and two tags, the app's and the plugin's. It now shows one: the app's for a plugin the card hasn't updated, the plugin's own for one it has.
+- The one-click update looks again at what there is to update before it starts, so a plugin the app's button just updated isn't tried again. When the reply to an update is lost, the card no longer says the plugin stayed on its version: it asks you to check on the Plugins page.
+- The [how-to](dsh-plugins/README.md#if-something-doesnt-work) says what to do when the app's own **Update to x** fails on the second of two plugins and switches it off, and that 2.9.2 and earlier can use that button on DeepSeek Harness 0.2.2 instead of updating by hand.
+
+## 2.10.0 - 2026-11-05
+
+### Features
+- **The DeepSeek Harness plugins update in one click.** When a new version is out, the app offers it: a card at the bottom right, a line at the top of the **Artifacts** page, and an **Update** button on each plugin's page. One click updates the plugins together, with nothing to uninstall, and most updates need no restart. If an update fails, the plugin stays on the version it was. A plugin added from a folder isn't offered one. This starts with 2.10.0, so 2.9.2 and earlier need [one last update by hand](dsh-plugins/README.md#update).
+- **DeepSeek Harness: a skill can be kept to one agent preset.** Turn off the plugin's own row and declare the plugin in the preset, and `/` lists the skill only in that preset's sessions. The **Artifacts** page and comments keep working, through a new package, `dsh-claude-artifacts`, that each plugin installs with it. See [how to set it up](dsh-plugins/README.md#keep-a-skill-to-one-preset).
+
+### Fixes
+- `archive` and the **Whole folder** export zipped `.git`, including the remote's address and any token in it, and that zip is what gets sent to other people. `.git` now stays out, at any depth.
+- An artifact folder's default `.gitignore` took `exports/` (a film's MP4 too) and two of the three temp file shapes into git, and its `history/` rule also matched a project's own folder of that name, which git then dropped. `history/` and `exports/` now match only at the top of the folder.
+- `share` could give out a TUN proxy's address, such as sing-box's `172.19.0.1`, first when the system lists it first. It now skips an address that answers at every port, and lists tunnels after the local network.
+- Design's Standalone export: a `#id` link did nothing when the file was opened directly, and over `http://` it also scrolled the page around the frame. A click now scrolls inside the frame only, as Play does.
+
+## 2.9.2 - 2026-11-04
+
+### Fixes
+- DeepSeek Harness on Windows: the command the skills told the agent to run was written for a POSIX shell, and PowerShell reads a quoted path at the start of a line as a string, not a command. On Windows they now give `& '<node>' '<script>' <command>`, and say that PowerShell has no heredoc.
+
+## 2.9.1 - 2026-11-04
+
+### Fixes
+- DeepSeek Harness on Windows: the plugins only recognized a shell tool named `bash`, and on Windows it is named `pwsh`, so they never noticed an `open`. The folder stayed off the **Artifacts** page, **Send to Agent** never appeared, and comments did not reach the agent. They now recognize both names (by @leil894-collab, [#31](https://github.com/JimLiu/baoyu-design/pull/31); reported by @EmotionTowel, [#30](https://github.com/JimLiu/baoyu-design/issues/30)).
+
 ## 2.9.0 - 2026-11-03
 
 ### Features

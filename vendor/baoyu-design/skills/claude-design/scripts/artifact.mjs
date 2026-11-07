@@ -1226,8 +1226,8 @@ import path7 from "node:path";
 var DESIGN_SYSTEM_FILE = "design-system.json";
 var BLOBS_DIR = "_blobs";
 var DESIGN_SYSTEM_LIMITS = {
-  files: 1024,
-  ownFiles: 1008,
+  files: 4096,
+  ownFiles: 4080,
   totalBytes: 256 * 1024 * 1024,
   fileBytes: 15 * 1024 * 1024,
   publishBytes: 16 * 1024 * 1024,
@@ -1273,7 +1273,9 @@ var REFUSED_TOOL_FILENAMES = /* @__PURE__ */ new Set([
   "deno.jsonc",
   "claude.md",
   "claude.local.md",
-  "agents.md"
+  "agents.md",
+  "agent.md",
+  "gemini.md"
 ]);
 var WINDOWS_SHORT_NAME_PATTERN = /~\d/;
 var IMAGE_SLOT_STATE_FILENAME = ".image-slots.state.json";
@@ -2748,7 +2750,7 @@ import { promisify } from "node:util";
 import zlib from "node:zlib";
 var LOCAL_FILES = /* @__PURE__ */ new Set([STATE_FILE, LOG_FILE, SHARING_FILE]);
 var LOCAL_DIRS = /* @__PURE__ */ new Set([EXPORTS_DIR]);
-var JUNK_FILES = /* @__PURE__ */ new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
+var JUNK_FILES = /* @__PURE__ */ new Set([".DS_Store", "Thumbs.db", "desktop.ini", ".git"]);
 var isTemp = (name) => name.endsWith(".tmp") || name.startsWith(".tmp-");
 var STORED = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".heic", ".mp4", ".m4v", ".mov", ".webm", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".woff", ".woff2", ".zip", ".gz", ".br", ".zst", ".7z"]);
 var MAX_ENTRIES = 65535;
@@ -2822,7 +2824,7 @@ async function writeZip(entries, write) {
   for (const entry of entries) {
     let data;
     try {
-      data = await fsp2.readFile(entry.file);
+      data = entry.data ?? await fsp2.readFile(entry.file);
     } catch (error) {
       if (error.code === "ENOENT") continue;
       throw error;

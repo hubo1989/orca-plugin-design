@@ -6,7 +6,7 @@ This Orca plugin bundles code under several licenses:
 - The Anthropic Design canvas editor (`editor/assets/`, `editor/artifact-type/`) is adapted from Anthropic's claude.ai Artifact types. Their instructions, design assets, and icon fonts remain Anthropic's intellectual property and are not under the MIT License.
 - Third-party open-source dependencies used in the editor bundle are listed in `editor/third-party-licenses.txt`.
 
-## Vendored: baoyu-design (2026-11-04)
+## Vendored: baoyu-design (2026-11-06, v2.12.0)
 
 `vendor/baoyu-design/` is a verbatim vendor of https://github.com/JimLiu/baoyu-design
 (`skills/` + `LICENSE` + `NOTICE.md` + changelogs + READMEs). Its three-tier license
