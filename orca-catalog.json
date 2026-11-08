@@ -1,0 +1,115 @@
+{
+  "catalogVersion": 2,
+  "name": "Prototype Studio",
+  "owner": "hubo1989",
+  "plugins": [
+    {
+      "id": "hubo.prototype-studio",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/hubo1989/orca-plugin-design.git",
+        "ref": "main"
+      },
+      "description": "Prototype Studio — 五类设计作品（幻灯片/设计/设计系统/看板/动效）在一个项目库 Tab 中管理",
+      "homepage": "https://github.com/hubo1989/orca-plugin-design",
+      "categories": [
+        "design",
+        "productivity"
+      ],
+      "releases": [
+        {
+          "version": "0.1.0",
+          "commit": "cdf1ee10eada651e0ba66afac8d00515de76f272",
+          "contentHash": "8ddd92de3cff362b219b7cea7267764ee89cfecce1e3c86bcba80c8238182944",
+          "execution": "trusted-worker",
+          "minimumOrca": "1.4.248",
+          "name": "Prototype Studio",
+          "contributes": [
+            {
+              "kind": "commands",
+              "name": "Open Claude Design Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Claude Slides Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Design System Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Claude Motion Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Claude Dashboard Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Design Gallery"
+            },
+            {
+              "kind": "events",
+              "name": "workspace.changed"
+            },
+            {
+              "kind": "events",
+              "name": "agent.status.changed"
+            },
+            {
+              "kind": "keybindings",
+              "name": "Mod+Alt+P",
+              "detail": "prototype.gallery"
+            },
+            {
+              "kind": "newFiles",
+              "name": "HTML Prototype (.proto.html)",
+              "detail": ".proto.html"
+            },
+            {
+              "kind": "statusBarItems",
+              "name": "Design"
+            }
+          ],
+          "capabilities": [
+            "workspace:read",
+            "agent:read"
+          ],
+          "images": {
+            "icon": {
+              "path": "assets/icon.png",
+              "alt": "Prototype Studio",
+              "sha256": "b73953997edbbe05ee8f3e64365f8518d6913313e0a75804537ca38200b678eb",
+              "width": 128,
+              "height": 128
+            },
+            "cover": {
+              "path": "assets/cover.png",
+              "alt": "Prototype Studio 项目库：五类设计工具入口与作品卡片",
+              "sha256": "b2c31787397e8916c3dae5217b8b65749fb698957573de2ff36c41879e6d7793",
+              "width": 1600,
+              "height": 1000
+            },
+            "screenshots": [
+              {
+                "path": "assets/gallery.png",
+                "alt": "项目库页面：新建入口与三张作品卡片",
+                "sha256": "8a2497747767e3345a564ad2f6958cab79fad0604073ae79f7a133ea4d01d154",
+                "width": 1280,
+                "height": 800
+              },
+              {
+                "path": "assets/editor.png",
+                "alt": "画布编辑器：无限画布与工具栏",
+                "sha256": "b7aa9266c319b6579df94d5b3b5870d1a5bb88878f765853f60eca280533b0fc",
+                "width": 1280,
+                "height": 800
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
