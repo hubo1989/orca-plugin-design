@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { guardPost, MAX_BODY_BYTES } from './post-guard.mjs';
 
 import {
   SKILLS,
@@ -28,6 +29,7 @@ const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 const STATE_FILE = path.join(os.tmpdir(), 'prototype-studio-state.json');
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
+const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
 const PORT = Number(process.env.PORT) || 3480;
 const OPEN_TIMEOUT_MS = 30000;
 const TITLE_MAX = 200;
@@ -1568,6 +1570,10 @@ function showActionsMenu(item, anchorEl) {
     '<button type="button" class="bda-menu-item" data-menu-action="rename">' +
     SVG_ICONS.rename + '<span class="bda-menu-label">重命名</span><kbd class="bda-menu-key">R</kbd>' +
     '</button>' +
+    '<button type="button" class="bda-menu-item" data-menu-action="recreate">' +
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg>' +
+    '<span class="bda-menu-label">做同款</span><kbd class="bda-menu-key">S</kbd>' +
+    '</button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="copy">' +
     SVG_ICONS.copy + '<span class="bda-menu-label">复制链接</span><kbd class="bda-menu-key">C</kbd>' +
     '</button>' +
@@ -1588,6 +1594,14 @@ function showActionsMenu(item, anchorEl) {
       await reload();
     } else if (act === 'rename') {
       openRenameDialog(item);
+    } else if (act === 'recreate') {
+      const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
+      if (res.ok) {
+        showToast('✓ 已开新对话并发送同款草稿（' + (res.outcome || 'chat') + '）');
+      } else {
+        try { await navigator.clipboard.writeText(res.starter || ''); showToast('草稿已复制，请粘贴给 Agent：' + (res.error || '')); }
+        catch { showToast('做同款失败: ' + (res.error || '')); }
+      }
     } else if (act === 'copy') {
       const res = await api('/api/open?skill=' + encodeURIComponent(item.skill) + '&root=' + encodeURIComponent(item.root));
       if (res.ok && res.url) {
@@ -1896,13 +1910,54 @@ reload();
 </html>`;
 }
 
+// 做同款：按已有作品的记录构造 starter 草稿，经 `orca agent launch` 在焦点工作区
+// 开一个新对话并自动发送（guizang「做同款」的 Orca 化）。失败把 starter 返回给前端，
+// 前端退化为剪贴板复制，主流程不断。
+function buildStarter(rec, skill) {
+  return `${skill.prompt}与「${rec.title}」同款的新作。`
+    + `请先查看参考项目 ${rec.root} 的主题、版式与风格，沿用同一套设计语言，仅替换为新内容。`
+    + `新内容：`;
+}
+async function startFromArtifact(input) {
+  const root = String(input.root || '');
+  const rec = findArtifact(root);
+  if (!rec) return { ok: false, error: '未找到该作品的记录' };
+  const skill = SKILL_BY_ID[rec.skill];
+  if (!skill) return { ok: false, error: `未知技能: ${rec.skill}` };
+  const state = readState();
+  if (!state.workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+  const agent = String(input.agent || 'claude').replace(/[^a-z0-9-]/gi, '').slice(0, 32);
+  const starter = buildStarter(rec, skill);
+  const r = await new Promise((resolve) => {
+    execFile(ORCA_BIN, [
+      'agent', 'launch', '--agent', agent,
+      '--worktree', `path:${state.workspaceRoot}`,
+      '--surface', 'chat', '--focus',
+      '--prompt', starter, '--json',
+    ], { timeout: 20000 }, (err, stdout) => resolve({ err, stdout: String(stdout || '') }));
+  });
+  if (r.err) return { ok: false, error: `Agent 启动失败: ${r.err.message}`, starter };
+  try {
+    const j = JSON.parse(r.stdout);
+    if (!j.ok) return { ok: false, error: j.error?.message || 'agent launch 返回失败', starter };
+    return { ok: true, outcome: j.result?.outcome?.kind || 'chat', starter };
+  } catch {
+    return { ok: true, outcome: 'launched', starter };
+  }
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   res.setHeader('content-type', url.pathname === '/' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8');
   const allowedGet = ['/', '/api/list', '/api/open', '/api/open-url'];
-  const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor'];
+  const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start'];
   if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
     res.statusCode = 404; return res.end('{}');
+  }
+  // POST 收口：跨站 text/plain 伪装 POST（免预检通道）在此拒绝
+  if (req.method === 'POST') {
+    const g = guardPost(req);
+    if (g) { res.statusCode = g; return res.end('{}'); }
   }
   const finish = (v) => res.end(JSON.stringify(v));
 
@@ -1921,12 +1976,13 @@ const server = http.createServer((req, res) => {
   }
 
   let body = '';
-  req.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
+  req.on('data', (c) => { body += c; if (body.length > MAX_BODY_BYTES) req.destroy(); });
   req.on('end', async () => {
     let input = {}; try { input = JSON.parse(body || '{}'); } catch {}
     const skill = input.skill || '', root = input.root || '';
 
     if (url.pathname === '/api/open') return finish(await openSkillEditor(skill, root));
+    if (url.pathname === '/api/start') return finish(await startFromArtifact(input));
     if (url.pathname === '/api/update') {
       const rec = findArtifact(root);
       if (!rec) return finish({ ok: false, error: 'not recorded' });

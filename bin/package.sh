@@ -16,7 +16,7 @@ OUT="${PLUGIN_DIST_DIR:-../prototype-studio-dist}"
 PUBLISHER="${PLUGIN_PUBLISHER:-hubo}"
 ORCA="${ORCA_CLI:-/Applications/Orca.app/Contents/Resources/bin/orca}"
 
-INCLUDE=(orca-plugin.json package.json LICENSE NOTICE.md README.md assets src templates)
+INCLUDE=(orca-plugin.json package.json LICENSE NOTICE.md README.md assets references src templates)
 if [[ "${1:-}" == "--full" ]]; then
   INCLUDE+=(vendor)
 fi
