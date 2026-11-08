@@ -239,26 +239,28 @@ function isInstalledPluginPath(target) {
 
 // 读取焦点工作区
 const PROFILE_DB = path.join(process.env.HOME || os.homedir(), 'Library', 'Application Support', 'orca', 'profiles', 'local-default', 'profile-state.db');
+
+// 路径合法性：绝对路径且当前真实存在的目录。防止把 DB 二进制垃圾当工作区
+// （曾因对 .db 原始字节做正则而扫出乱码路径，导致 0 项目 + 花屏工作区名）。
+function validWsRoot(p) {
+  if (typeof p !== 'string' || !path.isAbsolute(p)) return false;
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
 function readState() {
   let explicit = {};
   try { explicit = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
-  if (explicit.workspaceRoot) return explicit;
-  try {
-    const raw = fs.readFileSync(PROFILE_DB);
-    const text = raw.toString('utf8');
-    const m = text.match(/activeWorktreeId"\s*:\s*"[^"]*::([^"\\]+)"/);
-    if (m) {
-      const p = m[1].replace(/\\u002F/g, '/').replace(/\\\\/g, '/');
-      return { workspaceRoot: p, workspaceName: p.split('/').filter(Boolean).pop() || '' };
-    }
-  } catch {}
+  if (validWsRoot(explicit.workspaceRoot)) return explicit;
+  // 唯一读取路径：sqlite3 CLI（正确处理 WAL）。绝不直接对 .db 字节做正则。
   try {
     const out = execFileSync('sqlite3', [PROFILE_DB,
-      "SELECT payload FROM profile_state_documents WHERE domain='workspaceSession'"], { timeout: 3000, encoding: 'utf8' });
+      "SELECT payload FROM profile_state_documents WHERE domain='workspaceSession'"],
+      { timeout: 3000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const ws = JSON.parse(out);
     const id = ws.activeWorktreeId || '';
     const p = id.includes('::') ? id.split('::').pop() : '';
-    if (p) return { workspaceRoot: p, workspaceName: p.split('/').filter(Boolean).pop() || '' };
+    if (validWsRoot(p)) {
+      return { workspaceRoot: p, workspaceName: p.split('/').filter(Boolean).pop() || '' };
+    }
   } catch {}
   return { workspaceRoot: '', workspaceName: '' };
 }

@@ -5,8 +5,26 @@
   "version": "0.1.0",
   "execution": "trusted-worker",
   "main": "src/worker.js",
-  "description": "Preview HTML prototypes in Orca's built-in browser with native DOM inspection, send-to-agent, and double-click copy editing.",
+  "description": "Design projects in Orca: canvas, slides, design systems, dashboard and motion editors in one gallery tab.",
   "license": "MIT",
+  "homepage": "https://github.com/hubo1989/orca-plugin-design",
+  "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "Prototype Studio 项目库：五类设计工具入口与作品卡片"
+  },
+  "screenshots": [
+    {
+      "path": "assets/gallery.png",
+      "alt": "项目库页面：新建入口与三张作品卡片",
+      "caption": "一个入口管理全部设计作品"
+    },
+    {
+      "path": "assets/editor.png",
+      "alt": "画布编辑器：无限画布与工具栏",
+      "caption": "库内同 Tab 打开的画布编辑器"
+    }
+  ],
   "engines": {
     "orca": ">=1.4.248"
   },
