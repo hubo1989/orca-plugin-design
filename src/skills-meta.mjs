@@ -86,6 +86,35 @@ export const ROOT_MARKERS = Object.fromEntries(SKILLS.map((s) => [s.id, [s.marke
 
 export const DEFAULT_PORTS = Object.fromEntries(SKILLS.map((s) => [s.id, s.port]));
 
+// 跨技能工作流（吸收自 guizang recipes）：一键把组合 starter 发给焦点工作区的 Agent。
+// template 写清步骤；第一步提示词内嵌，后续步骤由 Agent 按说明推进。
+export const RECIPES = [
+  {
+    id: 'ds-to-all',
+    title: '设计系统 → 全家统一',
+    desc: '先做一套设计系统，再用它的 token 做幻灯片',
+    template: '帮我先在当前工作区建立一套设计系统（品牌、色板、字体、间距），完成后基于这套设计系统的 token 直接做一份幻灯片，两步连续完成，风格保持统一。品牌是：',
+  },
+  {
+    id: 'canvas-to-motion',
+    title: '画布多稿 → 动效演示',
+    desc: '画布上探索几版设计，选优后做成动效',
+    template: '帮我在画布上并排做 3 版设计方案探索，比较后选出最优一版，然后把选中的方案做成一段动效演示。主题是：',
+  },
+  {
+    id: 'data-to-report',
+    title: '数据 → 看板 → 汇报',
+    desc: '先做数据看板，再产出汇报幻灯片',
+    template: '帮我先做一个数据看板（指标、图表、布局），看板完成后基于看板内容做一份汇报幻灯片，要点直接取自看板数据。数据是：',
+  },
+  {
+    id: 'explore-to-ds',
+    title: '画布探索 → 沉淀设计系统',
+    desc: '画布上试风格，定稿后沉淀成设计系统',
+    template: '帮我在画布上探索一个产品的视觉方向（多稿），定稿后把确定的风格沉淀成一套可复用的设计系统。产品是：',
+  },
+];
+
 export const PROMPTS = Object.fromEntries(SKILLS.map((s) => [s.id, s.prompt]));
 
 export const EDITOR_FILES = [

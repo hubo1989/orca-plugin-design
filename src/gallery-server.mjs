@@ -19,6 +19,7 @@ import {
   ROOT_MARKERS,
   DEFAULT_PORTS,
   PROMPTS,
+  RECIPES,
   EDITOR_FILES,
   NOT_CONTENT,
   EXAMPLE_TEMPLATES,
@@ -331,6 +332,20 @@ function scanDesignProjects(rootDir) {
   return found;
 }
 
+// 静态预览入口：返回作品的首个 HTML（幻灯片取 project/slides/，其余取 project/）。
+// 设计系统/看板/动效是 db 结构无静态页，返回 null，卡片回退骨架图。
+function previewEntry(root, skill) {
+  if (!root || !fs.existsSync(root)) return null;
+  const dirs = skill === 'claude-slides' ? ['project/slides', 'project'] : ['project'];
+  for (const d of dirs) {
+    try {
+      const files = fs.readdirSync(path.join(root, d)).filter((f) => f.endsWith('.html')).sort();
+      if (files.length) return path.join(root, d, files[0]);
+    } catch {}
+  }
+  return null;
+}
+
 function listArtifactsViews() {
   const state = readState();
   const workspaceRoot = state.workspaceRoot || '';
@@ -342,7 +357,9 @@ function listArtifactsViews() {
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
     const rec = readRecord(path.join(artifactsDir(), name));
-    if (rec === null || !fs.existsSync(rec.root)) continue;
+    if (rec === null) continue;
+    // 文件已不在：保留记录并显性化（missing），不再静默隐藏
+    if (!fs.existsSync(rec.root)) rec.missing = true;
     map.set(rec.root, rec);
   }
 
@@ -379,6 +396,8 @@ function listArtifactsViews() {
       meta: projectMeta(rec.skill, root),
       tail: root.split('/').slice(-2).join('/'),
       openable: true,
+      missing: rec.missing === true,
+      preview: rec.missing === true ? false : !!previewEntry(root, rec.skill),
     });
   }
 
@@ -623,6 +642,15 @@ body {
   cursor: pointer;
 }
 .bda-search button:hover { background: var(--dsw-alias-interactive-bg-hover); }
+/* 实时预览（懒加载缩放 iframe）与 missing 态 */
+.bda-live { position:absolute; inset:0; width:1280px; height:800px; transform-origin:0 0; border:0; background:transparent; pointer-events:none; opacity:0; transition:opacity .35s; }
+.bda-live.on { opacity:1; }
+.bda-item.bda-missing .bda-card, .bda-item.bda-missing .bda-row { opacity:.55; }
+.bda-missing-badge { position:absolute; left:8px; top:8px; z-index:3; font-size:11px; line-height:16px; padding:2px 8px; border-radius:999px; background:var(--dsw-alias-state-error-primary, #c0392b); color:#fff; }
+.bda-recipe-desc { font-size:12px; color:var(--dsw-alias-label-tertiary); line-height:1.5; }
+/* CJK 排版（吸收 guizang T4）：弹窗正文行长 ≤36em、行距 1.75；T10 中西文间距待 Chromium text-spacing 可用后跟进 */
+.bda-scrim p { max-width:36em; line-height:1.75; }
+
 .bda-section-title {
   margin: 0 0 12px;
   font-size: 13px;
@@ -1211,6 +1239,9 @@ body {
       <div class="bda-section-title">新建</div>
       <ul class="bda-tiles" id="tiles"></ul>
 
+      <div class="bda-section-title">工作流</div>
+      <ul class="bda-tiles" id="recipes" style="grid-template-columns:repeat(auto-fill,minmax(230px,1fr))"></ul>
+
       <div class="bda-section-title" id="listHeading">全部作品</div>
       <div id="container"></div>
     </div>
@@ -1235,6 +1266,7 @@ body {
 const TINTS = ${JSON.stringify(TINTS)};
 const SKILLS_CONFIG = ${JSON.stringify(SKILLS)};
 const SKILL_MAP = Object.fromEntries(SKILLS_CONFIG.map(s => [s.id, s]));
+const RECIPES = ${JSON.stringify(RECIPES)};
 
 const SVG_ICONS = {
   search: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>',
@@ -1479,10 +1511,12 @@ function renderItems() {
   if (isGrid) {
     container.innerHTML = '<ul class="bda-grid">' + items.map(it => {
       const isOpening = state.openingRoot === it.root;
-      return '<li class="bda-item" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + (TINTS[it.skill] || '#888') + '">' +
-        '<button type="button" class="bda-card" data-act="open" ' + (isOpening ? 'disabled' : '') + '>' +
+      return '<li class="bda-item' + (it.missing ? ' bda-missing' : '') + '" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + (TINTS[it.skill] || '#888') + '">' +
+        '<button type="button" class="bda-card" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
         '<span class="bda-preview">' +
         '<span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
+        (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="作品预览"></iframe>' : '') +
+        (it.missing ? '<span class="bda-missing-badge">文件已不在</span>' : '') +
         (isOpening ? '<span class="bda-busy"><span class="bda-spinner"></span>正在打开…</span>' : '') +
         '</span>' +
         '<span class="bda-info">' +
@@ -1519,6 +1553,24 @@ function renderItems() {
         '</li>';
     }).join('') + '</ul>';
   }
+  activateLivePreviews(container);
+}
+
+// 实时预览：进入视口才挂载 iframe（1280×800 等比缩到卡片宽），加载完成后淡入。
+// sandbox 不带 allow-same-origin：作品脚本以 opaque origin 运行，碰不到库服务的 API。
+function activateLivePreviews(container) {
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      io.unobserve(e.target);
+      const f = e.target;
+      const w = (f.parentElement && f.parentElement.clientWidth) || 320;
+      f.style.transform = 'scale(' + (w / 1280) + ')';
+      f.src = f.getAttribute('data-src');
+      f.addEventListener('load', () => f.classList.add('on'), { once: true });
+    }
+  }, { rootMargin: '160px' });
+  container.querySelectorAll('.bda-live[data-src]').forEach((f) => io.observe(f));
 }
 
 // 打开编辑器交互
@@ -1577,6 +1629,11 @@ function showActionsMenu(item, anchorEl) {
     '<button type="button" class="bda-menu-item" data-menu-action="copy">' +
     SVG_ICONS.copy + '<span class="bda-menu-label">复制链接</span><kbd class="bda-menu-key">C</kbd>' +
     '</button>' +
+    (item.missing
+      ? '<button type="button" class="bda-menu-item" data-menu-action="forget" data-danger="true">' +
+        SVG_ICONS.trash + '<span class="bda-menu-label">清除记录</span><kbd class="bda-menu-key">X</kbd>' +
+        '</button>'
+      : '') +
     '<div class="bda-menu-rule"></div>' +
     '<button type="button" class="bda-menu-item" data-menu-action="delete" data-danger="true">' +
     SVG_ICONS.trash + '<span class="bda-menu-label">删除</span><kbd class="bda-menu-key">Del</kbd>' +
@@ -1602,6 +1659,10 @@ function showActionsMenu(item, anchorEl) {
         try { await navigator.clipboard.writeText(res.starter || ''); showToast('草稿已复制，请粘贴给 Agent：' + (res.error || '')); }
         catch { showToast('做同款失败: ' + (res.error || '')); }
       }
+    } else if (act === 'forget') {
+      const res = await api('/api/forget', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
+      showToast(res.ok ? '已清除该作品的记录' : '清除失败: ' + (res.error || ''));
+      if (res.ok) await reload();
     } else if (act === 'copy') {
       const res = await api('/api/open?skill=' + encodeURIComponent(item.skill) + '&root=' + encodeURIComponent(item.root));
       if (res.ok && res.url) {
@@ -1816,7 +1877,19 @@ function showFilterMenu(anchorEl) {
 // 绑定全局点击与卡片交互
 document.getElementById('tiles').onclick = (e) => {
   const btn = e.target.closest('.bda-tile');
-  if (btn) openCreateDialog(btn.getAttribute('data-skill'));
+  if (btn && btn.getAttribute('data-skill')) openCreateDialog(btn.getAttribute('data-skill'));
+};
+
+document.getElementById('recipes').onclick = async (e) => {
+  const btn = e.target.closest('[data-recipe]');
+  if (!btn) return;
+  const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ recipe: btn.getAttribute('data-recipe') }) });
+  if (res.ok) {
+    showToast('✓ 已开新对话并发送工作流草稿（' + (res.outcome || 'chat') + '）');
+  } else {
+    try { await navigator.clipboard.writeText(res.starter || ''); showToast('草稿已复制，请粘贴给 Agent：' + (res.error || '')); }
+    catch { showToast('工作流启动失败: ' + (res.error || '')); }
+  }
 };
 
 document.getElementById('container').onclick = async (e) => {
@@ -1904,6 +1977,16 @@ async function reload() {
 
 // 初始化
 renderTiles();
+(function renderRecipes() {
+  const ul = document.getElementById('recipes');
+  ul.innerHTML = RECIPES.map(r =>
+    '<li><button type="button" class="bda-tile" data-recipe="' + esc(r.id) + '">' +
+    '<span class="bda-tile-art" style="min-height:40px;justify-content:flex-start">' +
+    '<span class="bda-tile-label" style="font-size:13px">' + esc(r.title) + '</span>' +
+    '</span>' +
+    '<span class="bda-recipe-desc" style="padding:0 2px">' + esc(r.desc) + '</span>' +
+    '</button></li>').join('');
+})();
 reload();
 </script>
 </body>
@@ -1918,20 +2001,11 @@ function buildStarter(rec, skill) {
     + `请先查看参考项目 ${rec.root} 的主题、版式与风格，沿用同一套设计语言，仅替换为新内容。`
     + `新内容：`;
 }
-async function startFromArtifact(input) {
-  const root = String(input.root || '');
-  const rec = findArtifact(root);
-  if (!rec) return { ok: false, error: '未找到该作品的记录' };
-  const skill = SKILL_BY_ID[rec.skill];
-  if (!skill) return { ok: false, error: `未知技能: ${rec.skill}` };
-  const state = readState();
-  if (!state.workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
-  const agent = String(input.agent || 'claude').replace(/[^a-z0-9-]/gi, '').slice(0, 32);
-  const starter = buildStarter(rec, skill);
+async function launchAgent(starter, agent) {
   const r = await new Promise((resolve) => {
     execFile(ORCA_BIN, [
       'agent', 'launch', '--agent', agent,
-      '--worktree', `path:${state.workspaceRoot}`,
+      '--worktree', `path:${readState().workspaceRoot || ''}`,
       '--surface', 'chat', '--focus',
       '--prompt', starter, '--json',
     ], { timeout: 20000 }, (err, stdout) => resolve({ err, stdout: String(stdout || '') }));
@@ -1945,12 +2019,30 @@ async function startFromArtifact(input) {
     return { ok: true, outcome: 'launched', starter };
   }
 }
+function cleanAgentId(v) {
+  return String(v || 'claude').replace(/[^a-z0-9-]/gi, '').slice(0, 32) || 'claude';
+}
+async function startFromArtifact(input) {
+  if (input.recipe) {
+    const r = RECIPES.find((x) => x.id === String(input.recipe));
+    if (!r) return { ok: false, error: '未知工作流' };
+    if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+    return launchAgent(r.template, cleanAgentId(input.agent));
+  }
+  const root = String(input.root || '');
+  const rec = findArtifact(root);
+  if (!rec) return { ok: false, error: '未找到该作品的记录' };
+  const skill = SKILL_BY_ID[rec.skill];
+  if (!skill) return { ok: false, error: `未知技能: ${rec.skill}` };
+  if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+  return launchAgent(buildStarter(rec, skill), cleanAgentId(input.agent));
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   res.setHeader('content-type', url.pathname === '/' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8');
-  const allowedGet = ['/', '/api/list', '/api/open', '/api/open-url'];
-  const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start'];
+  const allowedGet = ['/', '/api/list', '/api/open', '/api/open-url', '/api/preview'];
+  const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/forget'];
   if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
     res.statusCode = 404; return res.end('{}');
   }
@@ -1972,6 +2064,19 @@ const server = http.createServer((req, res) => {
         res.statusCode = 302; res.setHeader('location', r.url); return res.end();
       });
     }
+    if (url.pathname === '/api/preview') {
+      // 只读已登记记录或工作区 .design/ 内的 root，防任意文件读取
+      const ws = readState().workspaceRoot || '';
+      const designDir = ws ? path.resolve(ws, '.design') : '';
+      const rec = findArtifact(root);
+      const allowed = !!rec || (designDir && path.resolve(root).startsWith(designDir + path.sep));
+      const file = allowed ? previewEntry(root, skill) : null;
+      if (!file) { res.statusCode = 404; return res.end(); }
+      try {
+        res.setHeader('content-type', 'text/html; charset=utf-8');
+        return res.end(fs.readFileSync(file));
+      } catch { res.statusCode = 404; return res.end(); }
+    }
     return openSkillEditor(skill, root).then(finish);
   }
 
@@ -1983,6 +2088,16 @@ const server = http.createServer((req, res) => {
 
     if (url.pathname === '/api/open') return finish(await openSkillEditor(skill, root));
     if (url.pathname === '/api/start') return finish(await startFromArtifact(input));
+    if (url.pathname === '/api/forget') {
+      const rec = findArtifact(String(input.root || ''));
+      if (!rec) return finish({ ok: false, error: '未找到记录' });
+      try {
+        fs.rmSync(recordFile(rec.root), { force: true });
+        return finish({ ok: true });
+      } catch (err) {
+        return finish({ ok: false, error: err.message });
+      }
+    }
     if (url.pathname === '/api/update') {
       const rec = findArtifact(root);
       if (!rec) return finish({ ok: false, error: 'not recorded' });
