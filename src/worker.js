@@ -657,6 +657,18 @@ function isInstalledPluginPath(target) {
   }
 
   // Status bar item / shortcut: open the standalone gallery (ensures service first)
+  // 主题通道验证：宿主 appearance API 目前只有 revision（读不到当前 mode）。
+  // 打开库页前读一次：成功则记录通道可用，等上游暴露 mode 读取后此处一行接上。
+  function probeAppearance() {
+    try {
+      const r = orca.host.call('appearance.read', {});
+      if (r && typeof r.catch === 'function') {
+        r.then((a) => orca.log(`appearance channel ok (revision ${String(a && a.revision || '').slice(0, 8)}…)`))
+          .catch(() => {});
+      }
+    } catch { /* 宿主无此方法则静默 */ }
+  }
+
   // 状态栏条目运行期反馈：Orca 的 statusBarItems 是 manifest 声明式字段，
   // worker 无 UI API 可写它。可达的即时反馈通道是 tab 侧：先切/开 tab（URL 带
   // #opening 哈希，库页读到即显示加载动画），服务冷启动时库页自己每 500ms
@@ -670,5 +682,6 @@ function isInstalledPluginPath(target) {
   // ① 服务提前拉起（点击时无冷启动）② tab 缓存循环启动（点击走 switch 快路径）
   startTabCacheLoop();
   galleryAlive().then((alive) => { if (!alive) ensureGallery().catch(() => {}); });
+  probeAppearance();
   orca.log('Prototype Studio worker activated successfully.');
 }

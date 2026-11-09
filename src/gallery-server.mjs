@@ -1022,6 +1022,12 @@ body {
 /* CJK 排版（吸收 guizang T4）：弹窗正文行长 ≤36em、行距 1.75；T10 中西文间距待 Chromium text-spacing 可用后跟进 */
 .bda-scrim p { max-width:36em; line-height:1.75; }
 
+/* 主题覆盖链：URL ?scheme= > localStorage > 系统 prefers-color-scheme。
+   color-scheme 属性驱动上方所有 light-dark() 取值翻转，两行生效。
+   宿主当前无「读主题」API（appearance.read 仅 revision），待上游暴露后接入。 */
+html[data-scheme=dark] { color-scheme: dark; }
+html[data-scheme=light] { color-scheme: light; }
+
 .bda-section-title {
   margin: 0 0 12px;
   font-size: 13px;
@@ -1662,6 +1668,16 @@ const TINTS = ${JSON.stringify(TINTS)};
 const SKILLS_CONFIG = ${JSON.stringify(SKILLS)};
 const SKILL_MAP = Object.fromEntries(SKILLS_CONFIG.map(s => [s.id, s]));
 const RECIPES = ${JSON.stringify(RECIPES)};
+// 主题覆盖链（尽早执行避免闪色）：URL ?scheme=dark|light 记忆到 localStorage
+(() => {
+  try {
+    const q = new URLSearchParams(location.search).get('scheme');
+    const s = q === 'dark' || q === 'light' ? q : '';
+    if (s) localStorage.setItem('ps-scheme', s);
+    const saved = s || localStorage.getItem('ps-scheme') || '';
+    if (saved === 'dark' || saved === 'light') document.documentElement.dataset.scheme = saved;
+  } catch {}
+})();
 const OFFICIAL_EXAMPLES = ${JSON.stringify(OFFICIAL_EXAMPLES).replace(/</g, '\\u003c')};
 const EXAMPLE_TEMPLATES = ${JSON.stringify(Object.fromEntries(Object.keys(EXAMPLE_TEMPLATES).map((id) => [id, true])))};
 

@@ -14,6 +14,14 @@ if (!process.env.ORCA_CLI_COMMAND) {
 
 const workerUrl = new URL('../src/worker.js', import.meta.url);
 
+// 封闭性：readState 优先读 STATE_FILE——写死本仓库路径，避免宿主焦点恰在
+// 远程工作区时（activeWorktreeId 为远程三段式）smoke 误判失败
+const STATE_FILE = path.join(os.tmpdir(), 'prototype-studio-state.json');
+fs.writeFileSync(STATE_FILE, JSON.stringify({
+  workspaceRoot: path.resolve(workerUrl.pathname, '../..'),
+  workspaceName: 'orca-plugin-design',
+}));
+
 const handlers = new Map();
 const panelHandlers = new Map();
 
@@ -45,6 +53,12 @@ if (!gallery) {
 const t0 = Date.now();
 const r1 = await gallery();
 console.log(`first  click -> ${JSON.stringify(r1)} (${Date.now() - t0}ms)`);
+// 宿主焦点恰在远程工作区时（profile 库 activeWorktreeId 为远程三段式），
+// worker 的远程护栏会拒绝打开——这是设计行为，smoke 判 SKIP 不判 FAIL
+if (r1 && r1.error && r1.error.includes('远程')) {
+  console.log('SKIP: 宿主焦点当前在远程工作区，库页打开护栏按设计拒绝；切回本机工作区后重跑即全测');
+  process.exit(0);
+}
 const r2 = await gallery();
 console.log(`second click -> ${JSON.stringify(r2)}`);
 
