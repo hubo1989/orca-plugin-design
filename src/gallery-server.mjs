@@ -32,6 +32,21 @@ const STATE_FILE = path.join(os.tmpdir(), 'prototype-studio-state.json');
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
 const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
 const PORT = Number(process.env.PORT) || 3480;
+const EXAMPLES_INDEX = JSON.parse(fs.readFileSync(new URL('./examples.json', import.meta.url), 'utf8'));
+const OFFICIAL_EXAMPLES = [...new Set([...Object.keys(EXAMPLES_INDEX), ...Object.keys(EXAMPLE_TEMPLATES)])]
+  .filter((skill) => Object.hasOwn(SKILL_BY_ID, skill))
+  .map((skill) => {
+    const example = EXAMPLES_INDEX[skill] || {};
+    const template = EXAMPLE_TEMPLATES[skill] || {};
+    const files = { ...template.files, ...example.files };
+    return {
+      id: skill, skill,
+      title: example.title || `${SKILL_BY_ID[skill].name}示例`,
+      desc: example.desc || SKILL_BY_ID[skill].about,
+      points: example.points || Object.keys(files).join('、'),
+      html: Object.entries(files).find(([name]) => name.endsWith('.html'))?.[1] || '',
+    };
+  });
 const OPEN_TIMEOUT_MS = 30000;
 const TITLE_MAX = 200;
 const STAMP_MAX_ENTRIES = 20000;
@@ -105,15 +120,56 @@ function findArtifact(root) {
   return r?.root === root ? r : null;
 }
 
+// 预览与登记共用同一根目录边界；真实路径检查阻止 .design 内的符号链接逃逸。
+function allowedArtifactRoot(root) {
+  if (typeof root !== 'string' || !path.isAbsolute(root)) return false;
+  if (findArtifact(root)) return true;
+  const ws = readState().workspaceRoot;
+  if (!ws) return false;
+  const designDir = path.resolve(ws, '.design');
+  if (!path.resolve(root).startsWith(designDir + path.sep)) return false;
+  try {
+    const realDesignDir = path.join(fs.realpathSync(ws), '.design');
+    return fs.realpathSync(designDir) === realDesignDir &&
+      fs.realpathSync(root).startsWith(realDesignDir + path.sep);
+  } catch { return false; }
+}
+
+function registerArtifact(input) {
+  if (!input || typeof input !== 'object' || typeof input.skill !== 'string' || !Object.hasOwn(SKILL_BY_ID, input.skill)) {
+    return { ok: false, error: '未知技能' };
+  }
+  if (!validWsRoot(input.root)) return { ok: false, error: 'root 必须是存在的绝对目录路径' };
+  const root = path.resolve(input.root);
+  if (!allowedArtifactRoot(root)) return { ok: false, error: 'root 不在工作区 .design/ 内且尚未登记' };
+  for (const key of ['title', 'note']) {
+    if (input[key] !== undefined && typeof input[key] !== 'string') {
+      return { ok: false, error: `${key} 必须是字符串` };
+    }
+  }
+  const before = findArtifact(root);
+  const record = before ? { ...before } : {
+    v: 1, root, skill: input.skill,
+    title: input.title?.trim() || path.basename(root), openedAt: new Date().toISOString(),
+  };
+  if (input.title !== undefined) record.title = input.title.trim().slice(0, TITLE_MAX) || path.basename(root);
+  if (input.note !== undefined) record.note = input.note.trim().slice(0, 2000);
+  delete record.missing;
+  try {
+    writeRecord(record);
+    return { ok: true, record };
+  } catch (err) { return { ok: false, error: err.message }; }
+}
+
 function artifactTitle(skill, root) {
   const at = TITLES[skill];
-  if (!at) return path.basename(root);
+  if (!at) return '';
   try {
     const val = JSON.parse(fs.readFileSync(path.join(root, at[0]), 'utf8'))[at[1]];
     const title = typeof val === 'string' ? val.trim() : '';
     if (title && title !== 'project') return title;
   } catch {}
-  return path.basename(root);
+  return '';
 }
 
 function recordOpened(skill, root, now = new Date()) {
@@ -131,6 +187,8 @@ function recordOpened(skill, root, now = new Date()) {
     openedAt: now.toISOString(),
     firstOpenedAt: mine ? (mine.firstOpenedAt || mine.openedAt) : now.toISOString(),
     ...(mine?.pinned ? { pinned: true } : {}),
+    ...(mine?.note !== undefined ? { note: mine.note } : {}),
+    ...(mine?.id !== undefined ? { id: mine.id } : {}),
   };
   writeRecord(record);
   ensureThumb(record);
@@ -420,6 +478,7 @@ function listArtifactsViews() {
       shared: isShared(root),
       deletable: isDeletable(rec.skill, root),
       meta: projectMeta(rec.skill, root),
+      note: typeof rec.note === 'string' ? rec.note : '',
       tail: root.split('/').slice(-2).join('/'),
       openable: true,
       missing: rec.missing === true,
@@ -508,14 +567,290 @@ async function createExample(skillId, nameInput) {
   return { ok: true, root, problems };
 }
 
-function galleryHtml() {
+const GALLERY_STR = {
+  "zh": {
+    "works": "作品",
+    "searchPlaceholder": "搜索作品 (/)",
+    "search": "搜索作品",
+    "clearSearch": "清除搜索",
+    "sortFilter": "排序和筛选",
+    "switchView": "切换视图",
+    "refresh": "刷新列表",
+    "new": "新建",
+    "examples": "官方示例",
+    "workflows": "工作流",
+    "allWorks": "全部作品",
+    "back": "← 作品",
+    "popOut": "单独打开 ↗",
+    "language": "切换语言",
+    "undo": "撤销",
+    "restored": "已恢复作品",
+    "restoreFailed": "恢复失败: ",
+    "listView": "切换到列表视图",
+    "gridView": "切换到网格视图",
+    "noMatches": "没有符合条件的作品",
+    "noWorks": "还没有作品",
+    "clearHint": "尝试清除搜索词或筛选条件。",
+    "emptyHint": "Agent 用 baoyu-design 的技能做出来的东西都会出现在这里。点上面的入口开始做一个。",
+    "clearFilters": "清除筛选",
+    "projectPreview": "作品预览",
+    "missing": "文件已不在",
+    "opening": "正在打开…",
+    "more": "更多操作",
+    "unpin": "取消固定",
+    "pin": "固定",
+    "cannotOpen": "打不开：",
+    "unknownError": "未知错误",
+    "openFailed": "打开失败：",
+    "rename": "重命名",
+    "recreate": "做同款",
+    "copyLink": "复制链接",
+    "forget": "清除记录",
+    "delete": "删除",
+    "draftCopied": "草稿已复制，请粘贴给 Agent：",
+    "remixFailed": "做同款失败: ",
+    "forgotten": "已清除该作品的记录",
+    "forgetFailed": "清除失败: ",
+    "linkCopied": "链接已复制到剪贴板",
+    "linkFailed": "获取链接失败",
+    "renameTitle": "重命名作品",
+    "cancel": "取消",
+    "save": "保存",
+    "renameFailed": "重命名失败: ",
+    "deleteMove": "这会移除这个作品，它的文件夹移到应用数据目录下的 baoyu-design/trash。",
+    "deleteKeep": "这会把它从作品列表移除。它的文件夹里还有其他工程文件，所以留在原处：",
+    "deleteFailed": "删除失败: ",
+    "copyPrompt": "📋 复制 Agent 提示词",
+    "createBlank": "✨ 创建空白示例",
+    "promptCopied": "✓ 提示词已复制到剪贴板，发给 Agent 即可",
+    "copyFailed": "复制失败，请手动复制：",
+    "createFailed": "创建失败: ",
+    "sortOpened": "最近打开",
+    "sortUpdated": "最近修改",
+    "sortCreated": "创建时间",
+    "sortName": "名称",
+    "any": "不限",
+    "today": "今天",
+    "yesterday": "昨天",
+    "week": "最近 7 天",
+    "month": "最近 30 天",
+    "shared": "已共享",
+    "private": "未共享",
+    "sortBy": "排序方式",
+    "type": "类型",
+    "selectedSuffix": " 项",
+    "openedAt": "打开时间",
+    "sharing": "共享",
+    "pinned": "已固定",
+    "preview": "预览",
+    "exampleSkeleton": "此示例仅提供项目骨架，暂无静态页面。做同款后由 Agent 补充内容。",
+    "close": "关闭",
+    "exampleStarted": "已开新对话并发送示例草稿",
+    "startFailed": "启动失败：",
+    "draftPrefix": "；草稿：",
+    "workflowFailed": "工作流启动失败: ",
+    "refreshed": "✓ 列表已更新",
+    "workspace": "工作区 · ",
+    "loadFailed": "加载失败：",
+    "justOpened": "刚刚打开",
+    "openedRelative": "{time}打开",
+    "relativeFallback": "{count}{unit}前",
+    "minute": "分钟",
+    "hour": "小时",
+    "day": "天",
+    "weekUnit": "周",
+    "monthUnit": "个月",
+    "year": "年",
+    "boards": "{count} 画板",
+    "pages": "{count} 页",
+    "scenes": "{count} 场景",
+    "components": "{count} 组件",
+    "sheets": "{count} 报表",
+    "dashboard": "看板",
+    "samplePresentation": "示例演示",
+    "renameDescription": "为「{title}」设置新的标题：",
+    "renamed": "已重命名为「{title}」",
+    "deleteTitle": "删除“{title}”？",
+    "deleted": "已删除“{title}”。",
+    "removed": "已从作品里移除“{title}”，文件夹还在原处。",
+    "createTitle": "新建「{title}」",
+    "allWorksCount": "全部作品 ({count})",
+    "remixSent": "✓ 已开新对话并发送同款草稿（{outcome}）",
+    "workflowSent": "✓ 已开新对话并发送工作流草稿（{outcome}）",
+    "languageButton": "EN",
+    "previewTitle": "{title}预览"
+  },
+  "en": {
+    "works": "Projects",
+    "searchPlaceholder": "Search projects (/)",
+    "search": "Search projects",
+    "clearSearch": "Clear search",
+    "sortFilter": "Sort and filter",
+    "switchView": "Switch view",
+    "refresh": "Refresh list",
+    "new": "Create",
+    "examples": "Official examples",
+    "workflows": "Workflows",
+    "allWorks": "All projects",
+    "back": "← Projects",
+    "popOut": "Open separately ↗",
+    "language": "Switch language",
+    "undo": "Undo",
+    "restored": "Project restored",
+    "restoreFailed": "Restore failed: ",
+    "listView": "Switch to list view",
+    "gridView": "Switch to grid view",
+    "noMatches": "No matching projects",
+    "noWorks": "No projects yet",
+    "clearHint": "Try clearing your search or filters.",
+    "emptyHint": "Projects made by your agent with baoyu-design appear here. Choose a tool above to get started.",
+    "clearFilters": "Clear filters",
+    "projectPreview": "Project preview",
+    "missing": "Files missing",
+    "opening": "Opening…",
+    "more": "More actions",
+    "unpin": "Unpin",
+    "pin": "Pin",
+    "cannotOpen": "Cannot open: ",
+    "unknownError": "Unknown error",
+    "openFailed": "Open failed: ",
+    "rename": "Rename",
+    "recreate": "Remix",
+    "copyLink": "Copy link",
+    "forget": "Forget project",
+    "delete": "Delete",
+    "draftCopied": "Draft copied. Paste it to your agent: ",
+    "remixFailed": "Remix failed: ",
+    "forgotten": "Project record removed",
+    "forgetFailed": "Could not remove record: ",
+    "linkCopied": "Link copied to clipboard",
+    "linkFailed": "Could not get link",
+    "renameTitle": "Rename project",
+    "cancel": "Cancel",
+    "save": "Save",
+    "renameFailed": "Rename failed: ",
+    "deleteMove": "This removes the project and moves its folder to baoyu-design/trash in the application data directory.",
+    "deleteKeep": "This removes the project from the list. Its folder contains other project files and stays at: ",
+    "deleteFailed": "Delete failed: ",
+    "copyPrompt": "📋 Copy agent prompt",
+    "createBlank": "✨ Create blank example",
+    "promptCopied": "✓ Prompt copied. Send it to your agent.",
+    "copyFailed": "Copy failed. Copy this manually: ",
+    "createFailed": "Create failed: ",
+    "sortOpened": "Recently opened",
+    "sortUpdated": "Recently modified",
+    "sortCreated": "Creation time",
+    "sortName": "Name",
+    "any": "Any",
+    "today": "Today",
+    "yesterday": "Yesterday",
+    "week": "Last 7 days",
+    "month": "Last 30 days",
+    "shared": "Shared",
+    "private": "Private",
+    "sortBy": "Sort by",
+    "type": "Type",
+    "selectedSuffix": " selected",
+    "openedAt": "Opened",
+    "sharing": "Sharing",
+    "pinned": "Pinned",
+    "preview": "Preview",
+    "exampleSkeleton": "This example provides a project scaffold without a static page. Remix it to have your agent add content.",
+    "close": "Close",
+    "exampleStarted": "Example draft sent to a new chat",
+    "startFailed": "Start failed: ",
+    "draftPrefix": "; draft: ",
+    "workflowFailed": "Workflow failed: ",
+    "refreshed": "✓ List updated",
+    "workspace": "Workspace · ",
+    "loadFailed": "Load failed: ",
+    "justOpened": "Opened just now",
+    "openedRelative": "Opened {time}",
+    "relativeFallback": "{count} {unit} ago",
+    "minute": "minutes",
+    "hour": "hours",
+    "day": "days",
+    "weekUnit": "weeks",
+    "monthUnit": "months",
+    "year": "years",
+    "boards": "{count} artboards",
+    "pages": "{count} pages",
+    "scenes": "{count} scenes",
+    "components": "{count} components",
+    "sheets": "{count} sheets",
+    "dashboard": "Dashboard",
+    "samplePresentation": "Sample presentation",
+    "renameDescription": "Set a new title for “{title}”:",
+    "renamed": "Renamed to “{title}”",
+    "deleteTitle": "Delete “{title}”?",
+    "deleted": "Deleted “{title}”.",
+    "removed": "Removed “{title}” from projects. Its folder stays in place.",
+    "createTitle": "Create “{title}”",
+    "allWorksCount": "All projects ({count})",
+    "remixSent": "✓ Remix draft sent to a new chat ({outcome})",
+    "workflowSent": "✓ Workflow draft sent to a new chat ({outcome})",
+    "languageButton": "中",
+    "previewTitle": "{title} preview"
+  }
+};
+// Keep shared skill/example metadata in the same flat bilingual catalogue.
+for (const [index, skill] of SKILLS.entries()) {
+  for (const field of ['name', 'about', 'prompt']) GALLERY_STR.zh['skill.' + skill.id + '.' + field] = skill[field];
+  GALLERY_STR.en['skill.' + skill.id + '.name'] = skill.nameEn;
+  const [about, prompt] = [["Editable slides for presenting or exporting to PDF, HTML, or PowerPoint.", "Help me create a slide deck about: "], ["Explore editable designs side by side on a single canvas.", "Help me design: "], ["Build brand colors, typography, components, assets, and a brand guide.", "Help me create a design system for the brand: "], ["Create charts, metrics, and tables from your data, with live updates.", "Help me create a data dashboard from: "], ["Create short animations and export MP4 or GIF.", "Help me animate: "]][index];
+  GALLERY_STR.en['skill.' + skill.id + '.about'] = about;
+  GALLERY_STR.en['skill.' + skill.id + '.prompt'] = prompt;
+}
+for (const [index, recipe] of RECIPES.entries()) {
+  const [title, desc] = [["Design system → Unified projects", "Build a design system, then create slides with its tokens."], ["Canvas concepts → Motion demo", "Explore canvas concepts, choose one, then animate it."], ["Data → Dashboard → Report", "Build a data dashboard, then create a presentation."], ["Canvas exploration → Design system", "Explore visual directions, then capture a reusable design system."]][index];
+  for (const field of ['title', 'desc']) GALLERY_STR.zh['recipe.' + recipe.id + '.' + field] = recipe[field];
+  GALLERY_STR.en['recipe.' + recipe.id + '.title'] = title;
+  GALLERY_STR.en['recipe.' + recipe.id + '.desc'] = desc;
+}
+const EXAMPLE_EN = {
+  "claude-design": [
+    "Single-page canvas",
+    "Start an editable canvas with a blue background and a centered heading.",
+    "880 × 560 canvas, blue background, large centered heading, editable DC component"
+  ],
+  "claude-slides": [
+    "Presentation cover",
+    "Start a presentation with a dark background and a bold heading.",
+    "Dark cover, large centered heading, expandable slide order"
+  ],
+  "claude-design-system": [
+    "Brand design system",
+    "Establish brand guidelines from tokens and a project scaffold.",
+    "Brand colors, typography, spacing tokens, and component guidelines; this template contains an index, README, and empty token file"
+  ]
+};
+for (const example of OFFICIAL_EXAMPLES) {
+  for (const [index, field] of ['title', 'desc', 'points'].entries()) {
+    GALLERY_STR.zh['example.' + example.id + '.' + field] = example[field];
+    GALLERY_STR.en['example.' + example.id + '.' + field] = EXAMPLE_EN[example.id]?.[index] || example[field];
+  }
+}
+
+function galleryHtml(requestedLang = 'zh') {
+  const initialLang = requestedLang === 'en' ? 'en' : 'zh';
+  const text = (key) => GALLERY_STR[initialLang][key];
   return `<!doctype html>
-<html lang="zh-CN">
+<html data-i18n-pending lang="${initialLang === 'en' ? 'en' : 'zh-CN'}" data-initial-lang="${initialLang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>作品 · Prototype Studio</title>
+<title>${text('works')} · Prototype Studio</title>
+<script>
+// Select the remembered language before the first paint; the body renders synchronously.
+try {
+  const requested = new URLSearchParams(location.search).get('lang');
+  const saved = localStorage.getItem('ps_lang');
+  const selected = ['zh', 'en'].includes(requested) ? requested : ['zh', 'en'].includes(saved) ? saved : 'zh';
+  document.documentElement.lang = selected === 'en' ? 'en' : 'zh-CN';
+} catch { /* The server already supplied the URL/default language. */ }
+</script>
 <style>
+html[data-i18n-pending] body { visibility: hidden; }
 :root {
   color-scheme: light dark;
   --dsw-alias-bg-base: light-dark(#ffffff, #18181b);
@@ -674,6 +1009,15 @@ body {
 .bda-live.on { opacity:1; }
 .bda-item.bda-missing .bda-card, .bda-item.bda-missing .bda-row { opacity:.55; }
 .bda-missing-badge { position:absolute; left:8px; top:8px; z-index:3; font-size:11px; line-height:16px; padding:2px 8px; border-radius:999px; background:var(--dsw-alias-state-error-primary, #c0392b); color:#fff; }
+#examples { grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); }
+.bda-example { display:flex; flex-direction:column; gap:10px; padding:16px; border:1px solid var(--dsw-alias-border-l2); border-radius:14px; }
+.bda-example h3 { margin:0; font-size:14px; font-weight:500; }
+.bda-example p { margin:0; font-size:12px; line-height:1.6; color:var(--dsw-alias-label-secondary); }
+.bda-example-skill { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--dsw-alias-label-tertiary); }
+.bda-example-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:auto; }
+.bda-example-preview { overflow:hidden; width:100%; background:var(--dsw-alias-bg-skeleton); border-radius:8px; }
+.bda-example-preview iframe { width:880px; height:560px; border:0; transform-origin:top left; }
+.bda-example-skeleton { padding:24px; background:var(--dsw-alias-bg-skeleton); border-radius:8px; }
 .bda-recipe-desc { font-size:12px; color:var(--dsw-alias-label-tertiary); line-height:1.5; }
 /* CJK 排版（吸收 guizang T4）：弹窗正文行长 ≤36em、行距 1.75；T10 中西文间距待 Chromium text-spacing 可用后跟进 */
 .bda-scrim p { max-width:36em; line-height:1.75; }
@@ -1241,36 +1585,40 @@ body {
     <div class="bda-content">
       <div class="bda-heading">
         <div class="bda-heading-title">
-          <h1>作品</h1>
+          <h1 data-i18n="works">${text('works')}</h1>
           <span class="bda-ws" id="wsLabel"></span>
         </div>
         <div class="bda-tools">
+          <button type="button" class="bda-btn" id="languageBtn" data-i18n-title="language" data-i18n-label="language" title="${text('language')}" aria-label="${text('language')}">${text('languageButton')}</button>
           <div class="bda-search">
             <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
-            <input id="q" placeholder="搜索作品 (/)" aria-label="搜索作品">
-            <button id="clearSearch" class="hidden" title="清除搜索" aria-label="清除搜索">
+            <input id="q" data-i18n-placeholder="searchPlaceholder" placeholder="${text('searchPlaceholder')}" data-i18n-label="search" aria-label="${text('search')}">
+            <button id="clearSearch" class="hidden" data-i18n-title="clearSearch" title="${text('clearSearch')}" data-i18n-label="clearSearch" aria-label="${text('clearSearch')}">
               <svg viewBox="0 0 16 16" width="12" height="12" stroke="currentColor" stroke-width="1.3"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg>
             </button>
           </div>
-          <button class="bda-tool" id="filterBtn" title="排序和筛选" aria-label="排序和筛选">
+          <button class="bda-tool" id="filterBtn" data-i18n-title="sortFilter" title="${text('sortFilter')}" data-i18n-label="sortFilter" aria-label="${text('sortFilter')}">
             <svg viewBox="0 0 16 16" width="16" height="16" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3"/></svg>
           </button>
-          <button class="bda-tool" id="viewModeBtn" title="切换视图" aria-label="切换视图">
+          <button class="bda-tool" id="viewModeBtn" data-i18n-title="switchView" title="${text('switchView')}" data-i18n-label="switchView" aria-label="${text('switchView')}">
             <svg id="viewModeIcon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"></svg>
           </button>
-          <button class="bda-tool" id="reloadBtn" title="刷新列表" aria-label="刷新列表">
+          <button class="bda-tool" id="reloadBtn" data-i18n-title="refresh" title="${text('refresh')}" data-i18n-label="refresh" aria-label="${text('refresh')}">
             <svg viewBox="0 0 16 16" width="15" height="15" stroke="currentColor" stroke-width="1.3" fill="none"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9L14 6m0-4v4h-4"/></svg>
           </button>
         </div>
       </div>
 
-      <div class="bda-section-title">新建</div>
+      <div class="bda-section-title" data-i18n="new">${text('new')}</div>
       <ul class="bda-tiles" id="tiles"></ul>
 
-      <div class="bda-section-title">工作流</div>
+      <div class="bda-section-title" data-i18n="examples">${text('examples')}</div>
+      <ul class="bda-tiles" id="examples"></ul>
+
+      <div class="bda-section-title" data-i18n="workflows">${text('workflows')}</div>
       <ul class="bda-tiles" id="recipes" style="grid-template-columns:repeat(auto-fill,minmax(230px,1fr))"></ul>
 
-      <div class="bda-section-title" id="listHeading">全部作品</div>
+      <div class="bda-section-title" id="listHeading" data-i18n="allWorks">${text('allWorks')}</div>
       <div id="container"></div>
     </div>
   </div>
@@ -1278,9 +1626,9 @@ body {
 
 <div id="editorView" class="hidden">
   <div class="editor-bar">
-    <button class="bda-btn" id="backBtn">← 作品</button>
+    <button class="bda-btn" id="backBtn" data-i18n="back">${text('back')}</button>
     <span class="title" id="editorTitle"></span>
-    <button class="bda-btn" id="popBtn">单独打开 ↗</button>
+    <button class="bda-btn" id="popBtn" data-i18n="popOut">${text('popOut')}</button>
   </div>
   <iframe id="frame" allow="clipboard-read; clipboard-write"></iframe>
 </div>
@@ -1290,11 +1638,32 @@ body {
 <div id="menuLayer"></div>
 
 <script>
+const STR = ${JSON.stringify(GALLERY_STR).replace(/</g, '\\u003c')};
+const INITIAL_LANG = ${JSON.stringify(initialLang)};
+function readPreference(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function writePreference(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* Storage may be disabled in embedded browsers. */ }
+}
+const requestedLang = new URLSearchParams(location.search).get('lang');
+const rememberedLang = readPreference('ps_lang');
+let lang = Object.hasOwn(STR, requestedLang) ? requestedLang : Object.hasOwn(STR, rememberedLang) ? rememberedLang : INITIAL_LANG;
+writePreference('ps_lang', lang);
+function locale() { return lang === 'en' ? 'en' : 'zh-CN'; }
+function t(key, values = {}) {
+  const text = STR[lang][key] ?? STR.zh[key] ?? key;
+  return text.replace(/\\{(\\w+)\\}/g, (match, name) => String(values[name] ?? match));
+}
+function skillText(id, field) { return STR[lang]['skill.' + id + '.' + field] ?? id; }
+function exampleText(example, field) { return STR[lang]['example.' + example.id + '.' + field] ?? example[field]; }
 // 图标库与色彩
 const TINTS = ${JSON.stringify(TINTS)};
 const SKILLS_CONFIG = ${JSON.stringify(SKILLS)};
 const SKILL_MAP = Object.fromEntries(SKILLS_CONFIG.map(s => [s.id, s]));
 const RECIPES = ${JSON.stringify(RECIPES)};
+const OFFICIAL_EXAMPLES = ${JSON.stringify(OFFICIAL_EXAMPLES).replace(/</g, '\\u003c')};
+const EXAMPLE_TEMPLATES = ${JSON.stringify(Object.fromEntries(Object.keys(EXAMPLE_TEMPLATES).map((id) => [id, true])))};
 
 const SVG_ICONS = {
   search: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>',
@@ -1363,16 +1732,25 @@ function ago(iso) {
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return '';
   const seconds = Math.round((then - Date.now()) / 1000);
-  if (seconds > -60) return '刚刚打开';
+  if (seconds > -60) return t('justOpened');
   const steps = [['minute', 60], ['hour', 3600], ['day', 86400], ['week', 604800], ['month', 2629800], ['year', 31557600]];
   let unit = 'minute', size = 60;
   for (const [u, s] of steps) if (-seconds >= s) [unit, size] = [u, s];
+  let time;
   try {
-    const rtf = new Intl.RelativeTimeFormat('zh-CN', { numeric: 'auto' });
-    return rtf.format(Math.round(seconds / size), unit) + '打开';
+    time = new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' }).format(Math.round(seconds / size), unit);
   } catch {
-    return Math.abs(Math.round(seconds / size)) + unit + '前打开';
+    const key = unit === 'week' ? 'weekUnit' : unit === 'month' ? 'monthUnit' : unit;
+    time = t('relativeFallback', { count: Math.abs(Math.round(seconds / size)), unit: t(key) });
   }
+  return t('openedRelative', { time });
+}
+
+function localizedMeta(item) {
+  const match = /^(\\d+) /.exec(item.meta || '');
+  const keys = { 'claude-design': 'boards', 'claude-slides': 'pages', 'claude-motion': 'scenes', 'claude-design-system': 'components', 'claude-dashboard': 'sheets' };
+  if (match && keys[item.skill]) return t(keys[item.skill], {count: match[1]});
+  return item.skill === 'claude-dashboard' && item.meta ? t('dashboard') : item.meta || '';
 }
 
 // 客户端状态管理
@@ -1381,7 +1759,7 @@ let state = {
   workspaceName: '',
   workspaceRoot: '',
   search: '',
-  viewMode: localStorage.getItem('ps_view_mode') || 'grid',
+  viewMode: readPreference('ps_view_mode') || 'grid',
   filters: {
     sort: 'opened',
     types: [],
@@ -1398,26 +1776,26 @@ async function api(path, opts) {
 }
 
 function showToast(msg, undoTrashId) {
-  const t = document.getElementById('toast');
-  t.innerHTML = '<span style="display:inline-flex;align-items:center">' + SVG_ICONS.info + '</span><span class="bda-toast-text">' + esc(msg) + '</span>' +
-    (undoTrashId ? '<button type="button" class="bda-toast-undo" id="toastUndoBtn">撤销</button>' : '') +
+  const toast = document.getElementById('toast');
+  toast.innerHTML = '<span style="display:inline-flex;align-items:center">' + SVG_ICONS.info + '</span><span class="bda-toast-text">' + esc(msg) + '</span>' +
+    (undoTrashId ? ('<button type="button" class="bda-toast-undo" id="toastUndoBtn">' + t('undo') + '</button>') : '') +
     '<button type="button" class="bda-toast-close" id="toastCloseBtn"><svg viewBox="0 0 16 16" width="12" height="12" stroke="currentColor" stroke-width="1.3"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg></button>';
-  t.className = 'bda-toast';
-  document.getElementById('toastCloseBtn').onclick = () => t.className = 'hidden';
+  toast.className = 'bda-toast';
+  document.getElementById('toastCloseBtn').onclick = () => toast.className = 'hidden';
   if (undoTrashId) {
     document.getElementById('toastUndoBtn').onclick = async () => {
-      t.className = 'hidden';
+      toast.className = 'hidden';
       const r = await api('/api/restore', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ id: undoTrashId }) });
       if (r.ok) {
-        showToast('已恢复作品');
+        showToast(t('restored'));
         await reload();
       } else {
-        showToast('恢复失败: ' + (r.error || ''));
+        showToast(t('restoreFailed') + (r.error || ''));
       }
     };
   }
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => t.className = 'hidden', undoTrashId ? 10000 : 3500);
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => toast.className = 'hidden', undoTrashId ? 10000 : 3500);
 }
 
 function closeDialog() {
@@ -1475,7 +1853,7 @@ function getSortedList() {
   const sort = state.filters.sort;
   list.sort((a, b) => {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-    if (sort === 'name') return a.title.localeCompare(b.title, 'zh-CN');
+    if (sort === 'name') return a.title.localeCompare(b.title, locale());
     const key = sort === 'updated' ? 'updatedAt' : (sort === 'created' ? 'firstOpenedAt' : 'openedAt');
     return (b[key] || '').localeCompare(a[key] || '');
   });
@@ -1501,7 +1879,7 @@ function renderTiles() {
       '</svg>' +
       typeIconSvg(s.id, 36) +
       '</span>' +
-      '<span class="bda-tile-label">' + esc(s.name) + '</span>' +
+      '<span class="bda-tile-label">' + esc(skillText(s.id, 'name')) + '</span>' +
       '</button>' +
       '</li>';
   }).join('');
@@ -1513,16 +1891,16 @@ function renderItems() {
   const items = getSortedList();
   const isGrid = state.viewMode === 'grid';
   document.getElementById('viewModeIcon').innerHTML = isGrid ? SVG_ICONS.list : SVG_ICONS.grid;
-  document.getElementById('viewModeBtn').title = isGrid ? '切换到列表视图' : '切换到网格视图';
+  document.getElementById('viewModeBtn').title = isGrid ? t('listView') : t('gridView');
   document.getElementById('filterBtn').setAttribute('data-active', isFilterActive() ? 'true' : 'false');
-  document.getElementById('listHeading').textContent = '全部作品 (' + items.length + ')';
+  document.getElementById('listHeading').textContent = t('allWorksCount', {count: items.length});
 
   if (!items.length) {
     container.innerHTML = '<div class="bda-empty">' +
       SVG_ICONS.info +
-      '<h2>' + (state.search || isFilterActive() ? '没有符合条件的作品' : '还没有作品') + '</h2>' +
-      '<p>' + (state.search || isFilterActive() ? '尝试清除搜索词或筛选条件。' : 'Agent 用 baoyu-design 的技能做出来的东西都会出现在这里。点上面的入口开始做一个。') + '</p>' +
-      (isFilterActive() ? '<button type="button" class="bda-btn" id="clearFilterBtn" style="margin-top:12px">清除筛选</button>' : '') +
+      '<h2>' + (state.search || isFilterActive() ? t('noMatches') : t('noWorks')) + '</h2>' +
+      '<p>' + (state.search || isFilterActive() ? t('clearHint') : t('emptyHint')) + '</p>' +
+      (isFilterActive() ? ('<button type="button" class="bda-btn" id="clearFilterBtn" style="margin-top:12px">' + t('clearFilters') + '</button>') : '') +
       '</div>';
     if (document.getElementById('clearFilterBtn')) {
       document.getElementById('clearFilterBtn').onclick = () => {
@@ -1543,22 +1921,22 @@ function renderItems() {
         '<button type="button" class="bda-card" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
         '<span class="bda-preview">' +
         '<span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
-        (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="作品预览"></iframe>' : '') +
+        (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + ('" tabindex="-1" sandbox="allow-scripts" title="' + t('projectPreview') + '"></iframe>') : '') +
         (it.thumb ? '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">' : '') +
-        (it.missing ? '<span class="bda-missing-badge">文件已不在</span>' : '') +
-        (isOpening ? '<span class="bda-busy"><span class="bda-spinner"></span>正在打开…</span>' : '') +
+        (it.missing ? ('<span class="bda-missing-badge">' + t('missing') + '</span>') : '') +
+        (isOpening ? ('<span class="bda-busy"><span class="bda-spinner"></span>' + t('opening') + '</span>') : '') +
         '</span>' +
         '<span class="bda-info">' +
         '<span class="bda-glyph">' + typeIconSvg(it.skill, 18) + '</span>' +
         '<span class="bda-text">' +
         '<span class="bda-name" title="' + esc(it.title) + '">' + esc(it.title) + '</span>' +
-        '<span class="bda-meta">' + esc(it.meta ? it.meta + ' · ' : '') + ago(it.openedAt) + '</span>' +
+        '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + (it.note ? ' · ' + esc(it.note) : '') + '</span>' +
         '</span>' +
         '</span>' +
         '</button>' +
         '<div class="bda-actions">' +
-        '<button type="button" class="bda-act" data-act="more" title="更多操作">' + SVG_ICONS.more + '</button>' +
-        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? '取消固定' : '固定') + '">' +
+        ('<button type="button" class="bda-act" data-act="more" title="' + t('more') + '">') + SVG_ICONS.more + '</button>' +
+        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? t('unpin') : t('pin')) + '">' +
         (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
         '</button>' +
         '</div>' +
@@ -1571,13 +1949,13 @@ function renderItems() {
         '<button type="button" class="bda-row" data-act="open" ' + (isOpening ? 'disabled' : '') + '>' +
         '<span class="bda-glyph">' + (isOpening ? '<span class="bda-spinner"></span>' : typeIconSvg(it.skill, 18)) + '</span>' +
         '<span class="bda-name">' + esc(it.title) + '</span>' +
-        '<span class="bda-meta">' + esc(it.meta ? it.meta + ' · ' : '') + ago(it.openedAt) + '</span>' +
+        '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + (it.note ? ' · ' + esc(it.note) : '') + '</span>' +
         '</button>' +
         '<div class="bda-row-tools">' +
-        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? '取消固定' : '固定') + '">' +
+        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? t('unpin') : t('pin')) + '">' +
         (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
         '</button>' +
-        '<button type="button" class="bda-act" data-act="more" title="更多操作">' + SVG_ICONS.more + '</button>' +
+        ('<button type="button" class="bda-act" data-act="more" title="' + t('more') + '">') + SVG_ICONS.more + '</button>' +
         '</div>' +
         '</li>';
     }).join('') + '</ul>';
@@ -1609,18 +1987,18 @@ async function openItem(item) {
   try {
     const res = await api('/api/open?skill=' + encodeURIComponent(item.skill) + '&root=' + encodeURIComponent(item.root));
     if (!res.ok) {
-      showToast('打不开：' + (res.error || '未知错误'));
+      showToast(t('cannotOpen') + (res.error || t('unknownError')));
       return;
     }
     const frame = document.getElementById('frame');
-    document.getElementById('editorTitle').textContent = item.title + ' · ' + (SKILL_MAP[item.skill]?.name || item.skill);
+    document.getElementById('editorTitle').textContent = item.title + ' · ' + skillText(item.skill, 'name');
     frame.src = res.url;
     document.getElementById('popBtn').onclick = () => window.open(res.url, '_blank');
     document.getElementById('listView').classList.add('hidden');
     document.getElementById('editorView').classList.remove('hidden');
     history.pushState({ editor: true }, '', '#editor');
   } catch (err) {
-    showToast('打开失败：' + err.message);
+    showToast(t('openFailed') + err.message);
   } finally {
     state.openingRoot = null;
     renderItems();
@@ -1631,7 +2009,7 @@ function backToGallery() {
   document.getElementById('editorView').classList.add('hidden');
   document.getElementById('listView').classList.remove('hidden');
   document.getElementById('frame').src = 'about:blank';
-  if (location.hash) history.replaceState({}, '', location.pathname);
+  if (location.hash) history.replaceState({}, '', location.pathname + location.search);
   reload();
 }
 window.addEventListener('popstate', () => {
@@ -1646,26 +2024,26 @@ function showActionsMenu(item, anchorEl) {
   anchorEl.closest('.bda-item')?.setAttribute('data-menu', 'true');
   layer.innerHTML = '<div class="bda-menu" style="left:' + Math.min(rect.left, window.innerWidth - 220) + 'px;top:' + (rect.bottom + 6) + 'px">' +
     '<button type="button" class="bda-menu-item" data-menu-action="pin">' +
-    SVG_ICONS.pin + '<span class="bda-menu-label">' + (item.pinned ? '取消固定' : '固定') + '</span><kbd class="bda-menu-key">P</kbd>' +
+    SVG_ICONS.pin + '<span class="bda-menu-label">' + (item.pinned ? t('unpin') : t('pin')) + '</span><kbd class="bda-menu-key">P</kbd>' +
     '</button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="rename">' +
-    SVG_ICONS.rename + '<span class="bda-menu-label">重命名</span><kbd class="bda-menu-key">R</kbd>' +
+    SVG_ICONS.rename + ('<span class="bda-menu-label">' + t('rename') + '</span><kbd class="bda-menu-key">R</kbd>') +
     '</button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="recreate">' +
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg>' +
-    '<span class="bda-menu-label">做同款</span><kbd class="bda-menu-key">S</kbd>' +
+    ('<span class="bda-menu-label">' + t('recreate') + '</span><kbd class="bda-menu-key">S</kbd>') +
     '</button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="copy">' +
-    SVG_ICONS.copy + '<span class="bda-menu-label">复制链接</span><kbd class="bda-menu-key">C</kbd>' +
+    SVG_ICONS.copy + ('<span class="bda-menu-label">' + t('copyLink') + '</span><kbd class="bda-menu-key">C</kbd>') +
     '</button>' +
     (item.missing
       ? '<button type="button" class="bda-menu-item" data-menu-action="forget" data-danger="true">' +
-        SVG_ICONS.trash + '<span class="bda-menu-label">清除记录</span><kbd class="bda-menu-key">X</kbd>' +
+        SVG_ICONS.trash + ('<span class="bda-menu-label">' + t('forget') + '</span><kbd class="bda-menu-key">X</kbd>') +
         '</button>'
       : '') +
     '<div class="bda-menu-rule"></div>' +
     '<button type="button" class="bda-menu-item" data-menu-action="delete" data-danger="true">' +
-    SVG_ICONS.trash + '<span class="bda-menu-label">删除</span><kbd class="bda-menu-key">Del</kbd>' +
+    SVG_ICONS.trash + ('<span class="bda-menu-label">' + t('delete') + '</span><kbd class="bda-menu-key">Del</kbd>') +
     '</button>' +
     '</div>';
 
@@ -1683,22 +2061,22 @@ function showActionsMenu(item, anchorEl) {
     } else if (act === 'recreate') {
       const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
       if (res.ok) {
-        showToast('✓ 已开新对话并发送同款草稿（' + (res.outcome || 'chat') + '）');
+        showToast(t('remixSent', {outcome: res.outcome || 'chat'}));
       } else {
-        try { await navigator.clipboard.writeText(res.starter || ''); showToast('草稿已复制，请粘贴给 Agent：' + (res.error || '')); }
-        catch { showToast('做同款失败: ' + (res.error || '')); }
+        try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); }
+        catch { showToast(t('remixFailed') + (res.error || '')); }
       }
     } else if (act === 'forget') {
       const res = await api('/api/forget', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
-      showToast(res.ok ? '已清除该作品的记录' : '清除失败: ' + (res.error || ''));
+      showToast(res.ok ? t('forgotten') : t('forgetFailed') + (res.error || ''));
       if (res.ok) await reload();
     } else if (act === 'copy') {
       const res = await api('/api/open?skill=' + encodeURIComponent(item.skill) + '&root=' + encodeURIComponent(item.root));
       if (res.ok && res.url) {
         await navigator.clipboard.writeText(res.url);
-        showToast('链接已复制到剪贴板');
+        showToast(t('linkCopied'));
       } else {
-        showToast('获取链接失败');
+        showToast(t('linkFailed'));
       }
     } else if (act === 'delete') {
       openDeleteDialog(item);
@@ -1709,12 +2087,12 @@ function showActionsMenu(item, anchorEl) {
 // 重命名弹窗
 function openRenameDialog(item) {
   openDialog(
-    '<h2>重命名作品</h2>' +
-    '<p>为「' + esc(item.title) + '」设置新的标题：</p>' +
+    ('<h2>' + t('renameTitle') + '</h2>') +
+    '<p>' + esc(t('renameDescription', {title: item.title})) + '</p>' +
     '<input id="renameInput" value="' + esc(item.title) + '" maxlength="200" autofocus>' +
     '<div class="bda-dialog-actions">' +
-    '<button type="button" class="bda-btn" id="renameCancel">取消</button>' +
-    '<button type="button" class="bda-btn" data-primary="true" id="renameSave">保存</button>' +
+    ('<button type="button" class="bda-btn" id="renameCancel">' + t('cancel') + '</button>') +
+    ('<button type="button" class="bda-btn" data-primary="true" id="renameSave">' + t('save') + '</button>') +
     '</div>'
   );
   const input = document.getElementById('renameInput');
@@ -1727,10 +2105,10 @@ function openRenameDialog(item) {
     closeDialog();
     const res = await api('/api/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, title: val, skill: item.skill }) });
     if (res.ok) {
-      showToast('已重命名为「' + val + '」');
+      showToast(t('renamed', {title: val}));
       await reload();
     } else {
-      showToast('重命名失败: ' + (res.error || ''));
+      showToast(t('renameFailed') + (res.error || ''));
     }
   };
 }
@@ -1738,14 +2116,14 @@ function openRenameDialog(item) {
 // 删除确认弹窗
 function openDeleteDialog(item) {
   const desc = item.deletable ?
-    '这会移除这个作品，它的文件夹移到应用数据目录下的 baoyu-design/trash。' :
-    '这会把它从作品列表移除。它的文件夹里还有其他工程文件，所以留在原处：' + item.root;
+    t('deleteMove') :
+    t('deleteKeep') + item.root;
   openDialog(
-    '<h2>删除“' + esc(item.title) + '”？</h2>' +
+    '<h2>' + esc(t('deleteTitle', {title: item.title})) + '</h2>' +
     '<p>' + esc(desc) + '</p>' +
     '<div class="bda-dialog-actions">' +
-    '<button type="button" class="bda-btn" id="deleteCancel">取消</button>' +
-    '<button type="button" class="bda-btn" data-danger="true" id="deleteConfirm">删除</button>' +
+    ('<button type="button" class="bda-btn" id="deleteCancel">' + t('cancel') + '</button>') +
+    ('<button type="button" class="bda-btn" data-danger="true" id="deleteConfirm">' + t('delete') + '</button>') +
     '</div>'
   );
   document.getElementById('deleteCancel').onclick = closeDialog;
@@ -1753,10 +2131,10 @@ function openDeleteDialog(item) {
     closeDialog();
     const res = await api('/api/delete', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
     if (res.ok) {
-      showToast(item.deletable ? '已删除“' + item.title + '”。' : '已从作品里移除“' + item.title + '”，文件夹还在原处。', res.trash);
+      showToast(item.deletable ? t('deleted', {title: item.title}) : t('removed', {title: item.title}), res.trash);
       await reload();
     } else {
-      showToast('删除失败: ' + (res.error || ''));
+      showToast(t('deleteFailed') + (res.error || ''));
     }
   };
 }
@@ -1769,23 +2147,23 @@ function openCreateDialog(skillId) {
   openDialog(
     '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
     typeIconSvg(s.id, 26) +
-    '<h2 style="margin:0">新建「' + esc(s.name) + '」</h2>' +
+    '<h2 style="margin:0">' + esc(t('createTitle', {title: skillText(s.id, 'name')})) + '</h2>' +
     '</div>' +
-    '<p>' + esc(s.about) + '</p>' +
+    '<p>' + esc(skillText(s.id, 'about')) + '</p>' +
     '<div class="bda-dialog-actions" style="margin-top:20px;display:flex;gap:8px">' +
-    '<button type="button" class="bda-btn" id="copyPromptBtn">📋 复制 Agent 提示词</button>' +
-    (canScaffold ? '<button type="button" class="bda-btn" data-primary="true" id="createScaffoldBtn">✨ 创建空白示例</button>' : '') +
-    '<button type="button" class="bda-btn" id="createCancel">取消</button>' +
+    ('<button type="button" class="bda-btn" id="copyPromptBtn">' + t('copyPrompt') + '</button>') +
+    (canScaffold ? ('<button type="button" class="bda-btn" data-primary="true" id="createScaffoldBtn">' + t('createBlank') + '</button>') : '') +
+    ('<button type="button" class="bda-btn" id="createCancel">' + t('cancel') + '</button>') +
     '</div>'
   );
   document.getElementById('createCancel').onclick = closeDialog;
   document.getElementById('copyPromptBtn').onclick = async () => {
     try {
-      await navigator.clipboard.writeText(s.prompt);
+      await navigator.clipboard.writeText(skillText(s.id, 'prompt'));
       closeDialog();
-      showToast('✓ 提示词已复制到剪贴板，发给 Agent 即可');
+      showToast(t('promptCopied'));
     } catch {
-      showToast('复制失败，请手动复制：' + s.prompt);
+      showToast(t('copyFailed') + skillText(s.id, 'prompt'));
     }
   };
   if (canScaffold) {
@@ -1797,7 +2175,7 @@ function openCreateDialog(skillId) {
         const found = state.artifacts.find(a => a.root === res.root);
         if (found) await openItem(found);
       } else {
-        showToast('创建失败: ' + (res.error || ''));
+        showToast(t('createFailed') + (res.error || ''));
       }
     };
   }
@@ -1809,14 +2187,14 @@ function showFilterMenu(anchorEl) {
   const layer = document.getElementById('menuLayer');
   const typeCounts = new Map();
   state.artifacts.forEach(a => typeCounts.set(a.skill, (typeCounts.get(a.skill) || 0) + 1));
-  const sortLabels = { opened: '最近打开', updated: '最近修改', created: '创建时间', name: '名称' };
-  const dateLabels = { any: '不限', today: '今天', yesterday: '昨天', week: '最近 7 天', month: '最近 30 天' };
-  const shareLabels = { any: '不限', shared: '已共享', private: '未共享' };
+  const sortLabels = { opened: t('sortOpened'), updated: t('sortUpdated'), created: t('sortCreated'), name: t('sortName') };
+  const dateLabels = { any: t('any'), today: t('today'), yesterday: t('yesterday'), week: t('week'), month: t('month') };
+  const shareLabels = { any: t('any'), shared: t('shared'), private: t('private') };
 
   layer.innerHTML = '<div class="bda-menu" style="right:' + (window.innerWidth - rect.right) + 'px;top:' + (rect.bottom + 6) + 'px">' +
     '<div class="bda-menu-row">' +
     '<button type="button" class="bda-menu-item">' +
-    '<span class="bda-menu-label">排序方式</span><span class="bda-menu-value">' + sortLabels[state.filters.sort] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
+    ('<span class="bda-menu-label">' + t('sortBy') + '</span><span class="bda-menu-value">') + sortLabels[state.filters.sort] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
     '</button>' +
     '<div class="bda-submenu">' +
     Object.entries(sortLabels).map(([k, v]) =>
@@ -1827,20 +2205,20 @@ function showFilterMenu(anchorEl) {
     '<div class="bda-menu-rule"></div>' +
     '<div class="bda-menu-row">' +
     '<button type="button" class="bda-menu-item">' +
-    '<span class="bda-menu-label">类型</span><span class="bda-menu-value">' + (state.filters.types.length ? state.filters.types.length + ' 项' : '不限') + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
+    ('<span class="bda-menu-label">' + t('type') + '</span><span class="bda-menu-value">') + (state.filters.types.length ? state.filters.types.length + t('selectedSuffix') : t('any')) + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
     '</button>' +
     '<div class="bda-submenu">' +
     SKILLS_CONFIG.map(s => {
       const on = state.filters.types.includes(s.id);
       return '<button type="button" class="bda-menu-item" data-toggle-type="' + s.id + '">' +
         '<span class="bda-check" data-on="' + on + '">' + (on ? SVG_ICONS.tick : '') + '</span>' +
-        '<span class="bda-menu-label">' + s.name + '</span>' +
+        '<span class="bda-menu-label">' + esc(skillText(s.id, 'name')) + '</span>' +
         '<span class="bda-menu-count">' + (typeCounts.get(s.id) || 0) + '</span></button>';
     }).join('') +
     '</div></div>' +
     '<div class="bda-menu-row">' +
     '<button type="button" class="bda-menu-item">' +
-    '<span class="bda-menu-label">打开时间</span><span class="bda-menu-value">' + dateLabels[state.filters.date] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
+    ('<span class="bda-menu-label">' + t('openedAt') + '</span><span class="bda-menu-value">') + dateLabels[state.filters.date] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
     '</button>' +
     '<div class="bda-submenu">' +
     Object.entries(dateLabels).map(([k, v]) =>
@@ -1850,7 +2228,7 @@ function showFilterMenu(anchorEl) {
     '</div></div>' +
     '<div class="bda-menu-row">' +
     '<button type="button" class="bda-menu-item">' +
-    '<span class="bda-menu-label">共享</span><span class="bda-menu-value">' + shareLabels[state.filters.sharing] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
+    ('<span class="bda-menu-label">' + t('sharing') + '</span><span class="bda-menu-value">') + shareLabels[state.filters.sharing] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
     '</button>' +
     '<div class="bda-submenu">' +
     Object.entries(shareLabels).map(([k, v]) =>
@@ -1860,9 +2238,9 @@ function showFilterMenu(anchorEl) {
     '</div></div>' +
     '<div class="bda-menu-rule"></div>' +
     '<button type="button" class="bda-menu-item" data-toggle-pinned="true">' +
-    '<span class="bda-menu-label">已固定</span>' + (state.filters.pinned ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') +
+    ('<span class="bda-menu-label">' + t('pinned') + '</span>') + (state.filters.pinned ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') +
     '</button>' +
-    (isFilterActive() ? '<button type="button" class="bda-menu-item" data-clear-filters="true"><span class="bda-menu-label">清除筛选</span></button>' : '') +
+    (isFilterActive() ? ('<button type="button" class="bda-menu-item" data-clear-filters="true"><span class="bda-menu-label">' + t('clearFilters') + '</span></button>') : '') +
     '</div>';
 
   const menu = layer.querySelector('.bda-menu');
@@ -1909,15 +2287,49 @@ document.getElementById('tiles').onclick = (e) => {
   if (btn && btn.getAttribute('data-skill')) openCreateDialog(btn.getAttribute('data-skill'));
 };
 
+document.getElementById('examples').onclick = async (e) => {
+  const btn = e.target.closest('[data-example]');
+  if (!btn) return;
+  const example = OFFICIAL_EXAMPLES.find(x => x.id === btn.getAttribute('data-example'));
+  if (!example) return;
+  if (btn.getAttribute('data-act') === 'preview') {
+    openDialog('<h2>' + esc(exampleText(example, 'title')) + '</h2><p>' + esc(exampleText(example, 'desc')) + '</p>' +
+      (example.html ? '<div class="bda-example-preview" id="examplePreview"><iframe sandbox="" title="' + esc(t('previewTitle', {title: exampleText(example, 'title')})) + '"></iframe></div>' :
+        '<div class="bda-example-skeleton">' + drawnHtml(example.skill, exampleText(example, 'title')) +
+        ('<p>' + t('exampleSkeleton') + '</p></div>')) +
+      '<p>' + esc(exampleText(example, 'points')) + ('</p><div class="bda-dialog-actions"><button type="button" class="bda-btn" id="exampleClose">' + t('close') + '</button></div>'));
+    document.getElementById('exampleClose').onclick = closeDialog;
+    if (example.html) {
+      const preview = document.getElementById('examplePreview');
+      const frame = preview.querySelector('iframe');
+      const scale = preview.clientWidth / 880;
+      preview.style.height = (560 * scale) + 'px';
+      frame.style.transform = 'scale(' + scale + ')';
+      frame.srcdoc = example.html.replaceAll(STR.zh.samplePresentation, t('samplePresentation'));
+    }
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ example: example.id }) });
+    if (res.ok) showToast(t('exampleStarted'));
+    else if (res.starter) {
+      try { await navigator.clipboard.writeText(res.starter); showToast(t('draftCopied') + (res.error || '')); }
+      catch { showToast(t('startFailed') + (res.error || '') + t('draftPrefix') + res.starter); }
+    } else showToast(t('startFailed') + (res.error || t('unknownError')));
+  } catch (err) { showToast(t('startFailed') + err.message); }
+  finally { btn.disabled = false; }
+};
+
 document.getElementById('recipes').onclick = async (e) => {
   const btn = e.target.closest('[data-recipe]');
   if (!btn) return;
   const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ recipe: btn.getAttribute('data-recipe') }) });
   if (res.ok) {
-    showToast('✓ 已开新对话并发送工作流草稿（' + (res.outcome || 'chat') + '）');
+    showToast(t('workflowSent', {outcome: res.outcome || 'chat'}));
   } else {
-    try { await navigator.clipboard.writeText(res.starter || ''); showToast('草稿已复制，请粘贴给 Agent：' + (res.error || '')); }
-    catch { showToast('工作流启动失败: ' + (res.error || '')); }
+    try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); }
+    catch { showToast(t('workflowFailed') + (res.error || '')); }
   }
 };
 
@@ -1974,7 +2386,7 @@ window.addEventListener('keydown', (e) => {
 // 视图切换
 document.getElementById('viewModeBtn').onclick = () => {
   state.viewMode = state.viewMode === 'grid' ? 'list' : 'grid';
-  localStorage.setItem('ps_view_mode', state.viewMode);
+  writePreference('ps_view_mode', state.viewMode);
   renderItems();
 };
 
@@ -1986,7 +2398,7 @@ document.getElementById('filterBtn').onclick = (e) => {
 // 刷新按钮
 document.getElementById('reloadBtn').onclick = async () => {
   await reload();
-  showToast('✓ 列表已更新');
+  showToast(t('refreshed'));
 };
 
 async function reload() {
@@ -1996,26 +2408,59 @@ async function reload() {
       state.artifacts = res.artifacts || [];
       state.workspaceName = res.workspaceName || '';
       state.workspaceRoot = res.workspaceRoot || '';
-      document.getElementById('wsLabel').textContent = state.workspaceName ? '工作区 · ' + state.workspaceName : '';
+      document.getElementById('wsLabel').textContent = state.workspaceName ? t('workspace') + state.workspaceName : '';
       renderItems();
     }
   } catch (err) {
-    showToast('加载失败：' + err.message);
+    showToast(t('loadFailed') + err.message);
   }
 }
 
-// 初始化
-renderTiles();
-(function renderRecipes() {
+// Localized sections share the same render entry point.
+function renderExamples() {
+  document.getElementById('examples').innerHTML = OFFICIAL_EXAMPLES.map(example =>
+    '<li class="bda-example"><span class="bda-example-skill">' + typeIconSvg(example.skill, 16) + esc(skillText(example.skill, 'name')) + '</span>' +
+    '<h3>' + esc(exampleText(example, 'title')) + '</h3><p>' + esc(exampleText(example, 'desc')) + '</p>' +
+    '<div class="bda-example-actions"><button type="button" class="bda-btn" data-act="preview" data-example="' + esc(example.id) + ('">' + t('preview') + '</button>') +
+    '<button type="button" class="bda-btn" data-primary="true" data-act="start" data-example="' + esc(example.id) + ('">' + t('recreate') + '</button></div></li>')).join('');
+}
+function renderRecipes() {
   const ul = document.getElementById('recipes');
   ul.innerHTML = RECIPES.map(r =>
     '<li><button type="button" class="bda-tile" data-recipe="' + esc(r.id) + '">' +
     '<span class="bda-tile-art" style="min-height:40px;justify-content:flex-start">' +
-    '<span class="bda-tile-label" style="font-size:13px">' + esc(r.title) + '</span>' +
+    '<span class="bda-tile-label" style="font-size:13px">' + esc(t('recipe.' + r.id + '.title')) + '</span>' +
     '</span>' +
-    '<span class="bda-recipe-desc" style="padding:0 2px">' + esc(r.desc) + '</span>' +
+    '<span class="bda-recipe-desc" style="padding:0 2px">' + esc(t('recipe.' + r.id + '.desc')) + '</span>' +
     '</button></li>').join('');
-})();
+}
+function renderAll() {
+  document.documentElement.lang = locale();
+  document.title = t('works') + ' · Prototype Studio';
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => { el.title = t(el.dataset.i18nTitle); });
+  document.querySelectorAll('[data-i18n-label]').forEach(el => { el.setAttribute('aria-label', t(el.dataset.i18nLabel)); });
+  document.getElementById('wsLabel').textContent = state.workspaceName ? t('workspace') + state.workspaceName : '';
+  document.getElementById('languageBtn').textContent = t('languageButton');
+  renderTiles();
+  renderExamples();
+  renderRecipes();
+  renderItems();
+  document.documentElement.removeAttribute('data-i18n-pending');
+}
+document.getElementById('languageBtn').onclick = () => {
+  lang = lang === 'zh' ? 'en' : 'zh';
+  writePreference('ps_lang', lang);
+  const url = new URL(location.href);
+  url.searchParams.set('lang', lang);
+  history.replaceState(history.state, '', url);
+  closeMenu();
+  closeDialog();
+  document.getElementById('toast').className = 'hidden';
+  renderAll();
+};
+renderAll();
 reload();
 </script>
 </body>
@@ -2052,6 +2497,13 @@ function cleanAgentId(v) {
   return String(v || 'claude').replace(/[^a-z0-9-]/gi, '').slice(0, 32) || 'claude';
 }
 async function startFromArtifact(input) {
+  if (input.example) {
+    const example = OFFICIAL_EXAMPLES.find((x) => x.id === String(input.example));
+    if (!example) return { ok: false, error: '未知官方示例' };
+    if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+    const starter = `${SKILL_BY_ID[example.skill].prompt}${example.desc}\n参考示例 ${example.points}。请在当前工作区 .design/ 内创建新项目。`;
+    return launchAgent(starter, cleanAgentId(input.agent));
+  }
   if (input.recipe) {
     const r = RECIPES.find((x) => x.id === String(input.recipe));
     if (!r) return { ok: false, error: '未知工作流' };
@@ -2071,7 +2523,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   res.setHeader('content-type', url.pathname === '/' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8');
   const allowedGet = ['/', '/api/list', '/api/open', '/api/open-url', '/api/preview', '/api/thumb'];
-  const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/forget'];
+  const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/register', '/api/forget'];
   if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
     res.statusCode = 404; return res.end('{}');
   }
@@ -2083,7 +2535,7 @@ const server = http.createServer((req, res) => {
   const finish = (v) => res.end(JSON.stringify(v));
 
   if (req.method === 'GET') {
-    if (url.pathname === '/') return res.end(galleryHtml());
+    if (url.pathname === '/') return res.end(galleryHtml(url.searchParams.get('lang')));
     if (url.pathname === '/api/list') return finish(listArtifactsViews());
     const skill = url.searchParams.get('skill') || '';
     const root = url.searchParams.get('root') || '';
@@ -2095,10 +2547,7 @@ const server = http.createServer((req, res) => {
     }
     if (url.pathname === '/api/preview' || url.pathname === '/api/thumb') {
       // 只读已登记记录或工作区 .design/ 内的 root，防任意文件读取
-      const ws = readState().workspaceRoot || '';
-      const designDir = ws ? path.resolve(ws, '.design') : '';
-      const rec = findArtifact(root);
-      const allowed = !!rec || (designDir && path.resolve(root).startsWith(designDir + path.sep));
+      const allowed = allowedArtifactRoot(root);
       const isThumb = url.pathname === '/api/thumb';
       const file = allowed ? (isThumb ? thumbPath(root) : previewEntry(root, skill)) : null;
       if (!file) { res.statusCode = 404; return res.end(); }
@@ -2114,9 +2563,17 @@ const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; if (body.length > MAX_BODY_BYTES) req.destroy(); });
   req.on('end', async () => {
-    let input = {}; try { input = JSON.parse(body || '{}'); } catch {}
+    let input = {}; try {
+      const parsed = JSON.parse(body || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed;
+    } catch {}
     const skill = input.skill || '', root = input.root || '';
 
+    if (url.pathname === '/api/register') {
+      const result = registerArtifact(input);
+      if (!result.ok) res.statusCode = 400;
+      return finish(result);
+    }
     if (url.pathname === '/api/open') return finish(await openSkillEditor(skill, root));
     if (url.pathname === '/api/start') return finish(await startFromArtifact(input));
     if (url.pathname === '/api/forget') {

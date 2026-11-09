@@ -218,3 +218,12 @@ node "<this skill's folder>/scripts/artifact.mjs" check "<root>" > /dev/null || 
 
 Under `artifact-type/reference/` in this skill's folder: format.md, fonts.md, layout.md, styles.md, images.md, photo-library.md, diagrams.md
 then diagram-recipes.md, craft.md, questions.md, view-state.md, deck-files.md.
+
+<!-- prototype-studio:append -->
+## Prototype Studio 插件附注
+
+本技能由 Prototype Studio vendored，上游来源见仓库根目录 `vendor/manifest.json`。
+
+项目库入口：Orca 状态栏 Design 图标或 `Mod+Alt+P`，也可通过命令面板打开对应编辑器。工作流：从项目库创建或打开作品，在编辑器中编辑，通过顶部返回条回到项目库；详细用法见仓库根目录 `README.md`。
+
+修改本附注请编辑仓库根目录 `vendor-rewrites.json`，然后运行 `node tools/vendor-baoyu.mjs apply-rewrites`，不要直接修改本文件的附注段；vendor snapshot 会自动重放该附注。
