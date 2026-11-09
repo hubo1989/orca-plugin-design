@@ -48,8 +48,33 @@ function dshHome() {
 
 function artifactsDir() { return path.join(dshHome(), 'artifacts'); }
 function trashDir() { return path.join(dshHome(), 'trash'); }
+function thumbsDir() {
+  const dir = path.join(dshHome(), 'thumbs');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 const folderHash = (root) => crypto.createHash('sha256').update(root).digest('hex').slice(0, 24);
 function recordFile(root) { return path.join(artifactsDir(), `${folderHash(root)}.json`); }
+function thumbPath(root) { return path.join(thumbsDir(), `${folderHash(root)}.png`); }
+
+const pendingThumbs = new Set();
+function ensureThumb(rec) {
+  try {
+    if (pendingThumbs.has(rec.root) || fs.existsSync(thumbPath(rec.root)) || !previewEntry(rec.root, rec.skill)) return;
+    const url = new URL(`http://127.0.0.1:${PORT}/api/preview`);
+    url.searchParams.set('skill', rec.skill);
+    url.searchParams.set('root', rec.root);
+    pendingThumbs.add(rec.root);
+    execFile(process.execPath, [path.join(pluginRoot, 'tools/thumb.mjs'), url.href, thumbPath(rec.root)],
+      { timeout: 30000 }, (err, stdout, stderr) => {
+        pendingThumbs.delete(rec.root);
+        if (err) console.error(`thumbnail: ${String(stderr?.trim() || err.message).split(/\r?\n/)[0]}`);
+      });
+  } catch (err) {
+    pendingThumbs.delete(rec.root);
+    console.error(`thumbnail: ${String(err.message).split(/\r?\n/)[0]}`);
+  }
+}
 
 function isRecord(v) {
   return typeof v === 'object' && v !== null && v.v === 1 &&
@@ -108,6 +133,7 @@ function recordOpened(skill, root, now = new Date()) {
     ...(mine?.pinned ? { pinned: true } : {}),
   };
   writeRecord(record);
+  ensureThumb(record);
   return record;
 }
 
@@ -398,6 +424,7 @@ function listArtifactsViews() {
       openable: true,
       missing: rec.missing === true,
       preview: rec.missing === true ? false : !!previewEntry(root, rec.skill),
+      thumb: rec.missing === true ? false : fs.existsSync(thumbPath(root)),
     });
   }
 
@@ -754,6 +781,7 @@ body {
   overflow: hidden;
   background: color-mix(in srgb, var(--bda-tint) 16%, var(--dsw-alias-bg-base));
 }
+.bda-thumb { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
 .bda-sheet {
   position: absolute;
   left: 12%;
@@ -1516,6 +1544,7 @@ function renderItems() {
         '<span class="bda-preview">' +
         '<span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
         (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="作品预览"></iframe>' : '') +
+        (it.thumb ? '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">' : '') +
         (it.missing ? '<span class="bda-missing-badge">文件已不在</span>' : '') +
         (isOpening ? '<span class="bda-busy"><span class="bda-spinner"></span>正在打开…</span>' : '') +
         '</span>' +
@@ -2041,7 +2070,7 @@ async function startFromArtifact(input) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   res.setHeader('content-type', url.pathname === '/' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8');
-  const allowedGet = ['/', '/api/list', '/api/open', '/api/open-url', '/api/preview'];
+  const allowedGet = ['/', '/api/list', '/api/open', '/api/open-url', '/api/preview', '/api/thumb'];
   const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/forget'];
   if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
     res.statusCode = 404; return res.end('{}');
@@ -2064,17 +2093,19 @@ const server = http.createServer((req, res) => {
         res.statusCode = 302; res.setHeader('location', r.url); return res.end();
       });
     }
-    if (url.pathname === '/api/preview') {
+    if (url.pathname === '/api/preview' || url.pathname === '/api/thumb') {
       // 只读已登记记录或工作区 .design/ 内的 root，防任意文件读取
       const ws = readState().workspaceRoot || '';
       const designDir = ws ? path.resolve(ws, '.design') : '';
       const rec = findArtifact(root);
       const allowed = !!rec || (designDir && path.resolve(root).startsWith(designDir + path.sep));
-      const file = allowed ? previewEntry(root, skill) : null;
+      const isThumb = url.pathname === '/api/thumb';
+      const file = allowed ? (isThumb ? thumbPath(root) : previewEntry(root, skill)) : null;
       if (!file) { res.statusCode = 404; return res.end(); }
       try {
-        res.setHeader('content-type', 'text/html; charset=utf-8');
-        return res.end(fs.readFileSync(file));
+        const content = fs.readFileSync(file);
+        res.setHeader('content-type', isThumb ? 'image/png' : 'text/html; charset=utf-8');
+        return res.end(content);
       } catch { res.statusCode = 404; return res.end(); }
     }
     return openSkillEditor(skill, root).then(finish);
