@@ -1028,6 +1028,17 @@ body {
 html[data-scheme=dark] { color-scheme: dark; }
 html[data-scheme=light] { color-scheme: light; }
 
+/* 中西文间距渐进增强：Chromium 支持情况见 cjk-typography.md T10。
+   不支持的浏览器保持现状（0.25em 方案文档化但不注入全局 letter-spacing）。 */
+@supports (text-autospace: normal) or (text-spacing-trim: space-all) {
+  .bda-scrim p,
+  .bda-name,
+  .bda-meta {
+    text-autospace: normal;
+    text-spacing-trim: space-all;
+  }
+}
+
 .bda-section-title {
   margin: 0 0 12px;
   font-size: 13px;

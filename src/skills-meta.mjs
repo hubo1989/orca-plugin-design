@@ -13,7 +13,7 @@ export const SKILLS = [
     titlePath: ['project/deck.json', 'title'],
     marker: 'project/deck.json',
     folder: ['project'],
-    prompt: '帮我做一份幻灯片，主题是：（每个 section 需带 data-layout="S01封面|S02章节|S03要点|S04引文|S05数据" 标注，版式约束见插件 references/layouts.json；未登记版式视为不合格）',
+    prompt: '帮我做一份幻灯片：\n风格：\n受众：\n时长：\n核心信息：\n数据或素材：\n页数偏好：\n语言：\n（风格槽为空必须先问用户再动手；无大纲时用叙事弧（钩子→定调→主体→转折→收束）先出一页式大纲再生成）（每个 section 需带 data-layout="S01封面|S02章节|S03要点|S04引文|S05数据" 标注，版式约束见插件 references/layouts.json；未登记版式视为不合格）',
     about: '做可以编辑的幻灯片，能直接演示，也能导出 PDF、HTML 或 PowerPoint。',
   },
   {
