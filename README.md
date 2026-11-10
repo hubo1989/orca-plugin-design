@@ -30,11 +30,22 @@
 cat orca-catalog.json   # 交给 Orca 的 catalog URL / 社区目录收录
 ```
 
-或直接把插件仓库作为 git 源安装：
+或直接把插件仓库作为 Git 源安装。任选其一，均会解析到 0.2.0：
 
 ```text
-https://github.com/hubo1989/orca-plugin-design.git   ref: main
+https://github.com/hubo1989/orca-plugin-design.git
+https://github.com/hubo1989/orca-plugin-design.git#main
+https://github.com/hubo1989/orca-plugin-design.git#v0.2.0
 ```
+
+CLI 等价写法：
+
+```bash
+orca plugin install 'https://github.com/hubo1989/orca-plugin-design.git' --json
+orca plugin install 'https://github.com/hubo1989/orca-plugin-design.git#v0.2.0' --json
+```
+
+> `#ref` 只接受真实存在的 branch / tag / 完整 40 位 commit SHA。本项目 tag 带 `v` 前缀（例如 `v0.2.0`）；填写 `#0.2.0`、未创建的 tag 或拼错分支会触发 `plugin_not_found`，UI 显示为「无法获取此 Git 版本。请检查 URL、#ref 和访问权限」。不带 `#ref` 时 Orca 优先选择最新 `vX.Y.Z` tag，否则回退默认分支。首次安装会停在 `approval_required`，这是权限确认，不是 Git fetch 失败。
 
 ### 从本地文件夹安装
 
