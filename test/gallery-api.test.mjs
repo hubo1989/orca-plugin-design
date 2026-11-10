@@ -11,7 +11,8 @@ fs.mkdirSync(wsDir, { recursive: true });
 fs.mkdirSync(designHome, { recursive: true });
 
 process.env.ORCA_DESIGN_HOME = designHome;
-const stateFile = path.join(os.tmpdir(), 'prototype-studio-state.json');
+process.env.ORCA_STATE_FILE = path.join(tmpDir, 'prototype-studio-state.json');
+const stateFile = process.env.ORCA_STATE_FILE;
 fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot: wsDir, workspaceName: 'test-workspace' }));
 
 const {

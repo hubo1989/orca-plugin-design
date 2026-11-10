@@ -19,7 +19,7 @@ git add -A && git commit -m "feat: ..." && git push
 orca plugin release-entry . --json | jq -r '.result.entry'
 ```
 
-输出是 **HEAD 提交**的 `{version, commit, contentHash, execution, minimumOrca, name, contributes, capabilities}`。它明确排除未提交的改动——必须先提交再生成。
+输出是 **HEAD 提交**的 `{version, commit, contentHash, execution, minimumOrca, name, contributes, capabilities, images}`。它明确排除未提交的改动——必须先提交再生成。`contentHash` 覆盖 HEAD tree 中的文件，包含 `orca-catalog.json` 自身；因此不要把 catalog 更新和代码改动放进同一个提交：先提交代码（C1），在 C1 上生成条目，再单独提交 catalog（C2）。Orca 安装时 checkout 的是 `releases[].commit`（即 C1），不会 checkout C2，也不会产生自引用 hash。
 
 ## 3. 更新 `orca-catalog.json`
 
@@ -27,12 +27,12 @@ orca plugin release-entry . --json | jq -r '.result.entry'
 
 ```bash
 orca plugin validate orca-catalog.json --json   # 校验 catalog（若命令支持）
-git add orca-catalog.json && git commit -m "chore(catalog): release 0.1.x" && git push
+git add orca-catalog.json && git commit -m "chore(catalog): release <version>" && git push
 ```
 
 ## 4. 用户侧更新
 
-以 catalog/git 源安装的插件由 Orca 按 ref 检查新 commit（策略 `auto` 默认开启，`manual` 时在插件设置里手动更新）；能力增长会重新征求同意。
+以 catalog/git 源安装的插件由 Orca 按 `source.ref` 读取 catalog，并按 `releases[].commit` 精确 checkout 安装字节；新 release 置顶后用户侧即可检查到更新（策略 `auto` 默认开启，`manual` 时在插件设置里手动更新）；能力增长会重新征求同意。
 从本地文件夹（`local-path`）安装的副本不会自动更新，需要重新 `git pull && bash bin/package.sh --full` 并重装。
 
 ## 字段约定
