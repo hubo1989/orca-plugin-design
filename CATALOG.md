@@ -30,6 +30,15 @@ orca plugin validate orca-catalog.json --json   # 校验 catalog（若命令支�
 git add orca-catalog.json && git commit -m "chore(catalog): release <version>" && git push
 ```
 
+发布合入后，还要创建带 `v` 前缀的 tag 并指向合入后的 ref tip，供用户以「纯 Git URL」或 `#v<version>` 安装：
+
+```bash
+git fetch origin main
+git push origin "$(git rev-parse origin/main):refs/tags/v<version>"
+```
+
+Orca 不带 `#ref` 时优先选择最新 `vX.Y.Z` tag；不存在的 tag / branch 会报「无法获取此 Git 版本」。该 tag 只用于 Git 安装入口的可读 ref，不改变 `releases[].commit` 或 `contentHash`。
+
 ## 4. 用户侧更新
 
 以 catalog/git 源安装的插件由 Orca 按 `source.ref` 读取 catalog，并按 `releases[].commit` 精确 checkout 安装字节；新 release 置顶后用户侧即可检查到更新（策略 `auto` 默认开启，`manual` 时在插件设置里手动更新）；能力增长会重新征求同意。
