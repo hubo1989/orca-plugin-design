@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "prototype-studio",
   "name": "Orca-Design",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "execution": "trusted-worker",
   "main": "src/worker.js",
   "description": "Design projects in Orca: canvas, slides, design systems, dashboard and motion editors in one gallery tab.",
