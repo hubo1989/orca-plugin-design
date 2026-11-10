@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Prototype Studio · 独立项目库服务（detached，固定 3480）
+// Orca-Design · 独立项目库服务（detached，固定 3480）
 // 视觉与交互完全对齐 dsh-claude-artifacts (baoyu-design v2.12.0)
 import { execFile, execFileSync } from 'node:child_process';
 import http from 'node:http';
@@ -858,7 +858,7 @@ function galleryHtml(requestedLang = 'zh', requestedScheme = '') {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${text('works')} · Prototype Studio</title>
+<title>${text('works')} · Orca-Design</title>
 <script>
 // Select the remembered language before the first paint; the body renders synchronously.
 try {
@@ -2483,7 +2483,7 @@ function renderRecipes() {
 }
 function renderAll() {
   document.documentElement.lang = locale();
-  document.title = t('works') + ' · Prototype Studio';
+  document.title = t('works') + ' · Orca-Design';
   document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
   document.querySelectorAll('[data-i18n-title]').forEach(el => { el.title = t(el.dataset.i18nTitle); });
