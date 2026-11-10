@@ -28,7 +28,7 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
-const STATE_FILE = path.join(os.tmpdir(), 'prototype-studio-state.json');
+const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
 const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
 const PORT = Number(process.env.PORT) || 3480;
@@ -325,7 +325,7 @@ function isInstalledPluginPath(target) {
 }
 
 // 读取焦点工作区
-const PROFILE_DB = path.join(process.env.HOME || os.homedir(), 'Library', 'Application Support', 'orca', 'profiles', 'local-default', 'profile-state.db');
+const PROFILE_DB = process.env.ORCA_PROFILE_DB || path.join(process.env.HOME || os.homedir(), 'Library', 'Application Support', 'orca', 'profiles', 'local-default', 'profile-state.db');
 
 // 路径合法性：绝对路径且当前真实存在的目录。防止把 DB 二进制垃圾当工作区
 // （曾因对 .db 原始字节做正则而扫出乱码路径，导致 0 项目 + 花屏工作区名）。
@@ -333,6 +333,24 @@ function validWsRoot(p) {
   if (typeof p !== 'string' || !path.isAbsolute(p)) return false;
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
+// 宿主主题：settings.theme 是 dark/light/system；system 交给浏览器 prefers-color-scheme。
+// 30s 缓存避免每次库页首帧都同步查 SQLite，读取失败退回系统偏好链。
+let hostSchemeCache = { value: '', at: 0 };
+function hostScheme() {
+  const now = Date.now();
+  if (now - hostSchemeCache.at < 30000) return hostSchemeCache.value;
+  let value = '';
+  try {
+    const out = execFileSync('sqlite3', [PROFILE_DB,
+      "SELECT payload FROM profile_state_documents WHERE domain='settings'"],
+      { timeout: 1500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const theme = JSON.parse(out).theme;
+    if (theme === 'dark' || theme === 'light') value = theme;
+  } catch { /* 宿主 profile 不可读时退回 prefers-color-scheme */ }
+  hostSchemeCache = { value, at: now };
+  return value;
+}
+
 function readState() {
   let explicit = {};
   try { explicit = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
@@ -831,11 +849,12 @@ for (const example of OFFICIAL_EXAMPLES) {
   }
 }
 
-function galleryHtml(requestedLang = 'zh') {
+function galleryHtml(requestedLang = 'zh', requestedScheme = '') {
   const initialLang = requestedLang === 'en' ? 'en' : 'zh';
+  const hostSchemeValue = requestedScheme === 'dark' || requestedScheme === 'light' ? requestedScheme : hostScheme();
   const text = (key) => GALLERY_STR[initialLang][key];
   return `<!doctype html>
-<html data-i18n-pending lang="${initialLang === 'en' ? 'en' : 'zh-CN'}" data-initial-lang="${initialLang}">
+<html data-i18n-pending lang="${initialLang === 'en' ? 'en' : 'zh-CN'}" data-initial-lang="${initialLang}"${hostSchemeValue ? ` data-host-scheme="${hostSchemeValue}"` : ''}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1019,16 +1038,15 @@ body {
 .bda-example-preview iframe { width:880px; height:560px; border:0; transform-origin:top left; }
 .bda-example-skeleton { padding:24px; background:var(--dsw-alias-bg-skeleton); border-radius:8px; }
 .bda-recipe-desc { font-size:12px; color:var(--dsw-alias-label-tertiary); line-height:1.5; }
-/* CJK 排版（吸收 guizang T4）：弹窗正文行长 ≤36em、行距 1.75；T10 中西文间距待 Chromium text-spacing 可用后跟进 */
+/* CJK 排版（吸收 guizang T4）：弹窗正文行长 ≤36em、行距 1.75；T3 中西文间距由下方原生属性渐进实施 */
 .bda-scrim p { max-width:36em; line-height:1.75; }
 
-/* 主题覆盖链：URL ?scheme= > localStorage > 系统 prefers-color-scheme。
-   color-scheme 属性驱动上方所有 light-dark() 取值翻转，两行生效。
-   宿主当前无「读主题」API（appearance.read 仅 revision），待上游暴露后接入。 */
+/* 主题覆盖链：URL ?scheme= > localStorage > 宿主 settings.theme > 系统 prefers-color-scheme。
+   color-scheme 属性驱动上方所有 light-dark() 取值翻转；宿主主题由服务端首帧注入。 */
 html[data-scheme=dark] { color-scheme: dark; }
 html[data-scheme=light] { color-scheme: light; }
 
-/* 中西文间距渐进增强：Chromium 支持情况见 cjk-typography.md T10。
+/* 中西文间距渐进增强：Chromium 支持情况见 cjk-typography.md T3。
    不支持的浏览器保持现状（0.25em 方案文档化但不注入全局 letter-spacing）。 */
 @supports (text-autospace: normal) or (text-spacing-trim: space-all) {
   .bda-scrim p,
@@ -1679,14 +1697,16 @@ const TINTS = ${JSON.stringify(TINTS)};
 const SKILLS_CONFIG = ${JSON.stringify(SKILLS)};
 const SKILL_MAP = Object.fromEntries(SKILLS_CONFIG.map(s => [s.id, s]));
 const RECIPES = ${JSON.stringify(RECIPES)};
-// 主题覆盖链（尽早执行避免闪色）：URL ?scheme=dark|light 记忆到 localStorage
+// 主题覆盖链（尽早执行避免闪色）：URL ?scheme= > 手动记忆 > 宿主注入 > 系统偏好
 (() => {
   try {
     const q = new URLSearchParams(location.search).get('scheme');
     const s = q === 'dark' || q === 'light' ? q : '';
-    if (s) localStorage.setItem('ps-scheme', s);
-    const saved = s || localStorage.getItem('ps-scheme') || '';
-    if (saved === 'dark' || saved === 'light') document.documentElement.dataset.scheme = saved;
+    if (s) { localStorage.setItem('ps-scheme', s); localStorage.setItem('ps-scheme-manual', '1'); }
+    const saved = s || (localStorage.getItem('ps-scheme-manual') ? localStorage.getItem('ps-scheme') : '');
+    const host = document.documentElement.dataset.hostScheme || '';
+    const resolved = saved || (host === 'dark' || host === 'light' ? host : '');
+    if (resolved) document.documentElement.dataset.scheme = resolved;
   } catch {}
 })();
 const OFFICIAL_EXAMPLES = ${JSON.stringify(OFFICIAL_EXAMPLES).replace(/</g, '\\u003c')};
@@ -2012,7 +2032,7 @@ async function openItem(item) {
   state.openingRoot = item.root;
   renderItems();
   try {
-    const res = await api('/api/open?skill=' + encodeURIComponent(item.skill) + '&root=' + encodeURIComponent(item.root));
+    const res = await api('/api/open', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ skill: item.skill, root: item.root }) });
     if (!res.ok) {
       showToast(t('cannotOpen') + (res.error || t('unknownError')));
       return;
@@ -2098,7 +2118,7 @@ function showActionsMenu(item, anchorEl) {
       showToast(res.ok ? t('forgotten') : t('forgetFailed') + (res.error || ''));
       if (res.ok) await reload();
     } else if (act === 'copy') {
-      const res = await api('/api/open?skill=' + encodeURIComponent(item.skill) + '&root=' + encodeURIComponent(item.root));
+      const res = await api('/api/open', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ skill: item.skill, root: item.root }) });
       if (res.ok && res.url) {
         await navigator.clipboard.writeText(res.url);
         showToast(t('linkCopied'));
@@ -2549,8 +2569,10 @@ async function startFromArtifact(input) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   res.setHeader('content-type', url.pathname === '/' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8');
-  const allowedGet = ['/', '/api/list', '/api/open', '/api/open-url', '/api/preview', '/api/thumb'];
-  const allowedPost = ['/api/open', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/register', '/api/forget'];
+  const allowedGet = ['/', '/api/list', '/api/preview', '/api/thumb'];
+  // 所有状态变更都走 POST + guardPost；/api/open 会拉起编辑器，/api/open-url 会跳转，
+  // 二者留在 GET 白名单会让跨站页面绕过收口（simple request 不触发 CORS 预检）。
+  const allowedPost = ['/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/register', '/api/forget'];
   if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
     res.statusCode = 404; return res.end('{}');
   }
@@ -2562,16 +2584,10 @@ const server = http.createServer((req, res) => {
   const finish = (v) => res.end(JSON.stringify(v));
 
   if (req.method === 'GET') {
-    if (url.pathname === '/') return res.end(galleryHtml(url.searchParams.get('lang')));
+    if (url.pathname === '/') return res.end(galleryHtml(url.searchParams.get('lang'), url.searchParams.get('scheme')));
     if (url.pathname === '/api/list') return finish(listArtifactsViews());
     const skill = url.searchParams.get('skill') || '';
     const root = url.searchParams.get('root') || '';
-    if (url.pathname === '/api/open-url') {
-      return openSkillEditor(skill, root).then((r) => {
-        if (!r.ok) { res.statusCode = 400; return finish(r); }
-        res.statusCode = 302; res.setHeader('location', r.url); return res.end();
-      });
-    }
     if (url.pathname === '/api/preview' || url.pathname === '/api/thumb') {
       // 只读已登记记录或工作区 .design/ 内的 root，防任意文件读取
       const allowed = allowedArtifactRoot(root);
@@ -2584,12 +2600,25 @@ const server = http.createServer((req, res) => {
         return res.end(content);
       } catch { res.statusCode = 404; return res.end(); }
     }
-    return openSkillEditor(skill, root).then(finish);
+    return finish({ ok: false, error: 'unknown GET route' });
   }
 
+  // POST 请求体上限：Content-Length 提前回 413；chunked 在累计超限后回一次 413。
+  // 原实现只 destroy()，客户端拿到的是 socket 断开而不是可判定的 HTTP 状态。
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    req.resume();
+    res.statusCode = 413; return res.end('{}');
+  }
   let body = '';
-  req.on('data', (c) => { body += c; if (body.length > MAX_BODY_BYTES) req.destroy(); });
+  let tooLarge = false;
+  req.on('data', (c) => {
+    if (tooLarge) return;
+    body += c;
+    if (body.length > MAX_BODY_BYTES) tooLarge = true;
+  });
   req.on('end', async () => {
+    if (tooLarge) { res.statusCode = 413; return res.end('{}'); }
     let input = {}; try {
       const parsed = JSON.parse(body || '{}');
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed;
@@ -2601,7 +2630,16 @@ const server = http.createServer((req, res) => {
       if (!result.ok) res.statusCode = 400;
       return finish(result);
     }
-    if (url.pathname === '/api/open') return finish(await openSkillEditor(skill, root));
+    if (url.pathname === '/api/open-url') {
+      const r = await openSkillEditor(skill, root);
+      if (!r.ok) { res.statusCode = 400; return finish(r); }
+      res.statusCode = 302; res.setHeader('location', r.url); return res.end();
+    }
+    if (url.pathname === '/api/open') {
+      const r = await openSkillEditor(skill, root);
+      if (!r.ok) res.statusCode = 400;
+      return finish(r);
+    }
     if (url.pathname === '/api/start') return finish(await startFromArtifact(input));
     if (url.pathname === '/api/forget') {
       const rec = findArtifact(String(input.root || ''));

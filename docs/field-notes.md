@@ -6,6 +6,7 @@
 
 ### 已修（带根因）
 
+- **评审收口轮 · 2026-11-10**：catalog 0.2.0 pin 到最终代码提交、dist 运行时断言、GET 状态变更关闭、413 请求体上限、无行为支撑的 `appearance:write` 撤除；根因与验证命令见本节上方 6 条。
 - **点击插件「运行失败」**：`openGalleryTab` 调用未定义的 `orcaTab(...)`（只定义了 `orcaTabCreate`），ReferenceError 直接冒泡使命令 promise 拒绝。修复：补通用 helper，并把 tab list/switch 包进 try/catch 失败退化新建。
 - **重装后 worker 崩溃循环**：`guardRegistration` 改写冻结的宿主对象（`orca.commands.register` 只读属性），严格模式 TypeError。修复：改为本地 `reg()/handle()` 包装器，不改宿主对象；mock host 改为 `Object.freeze` 防回归。
 - **工作区名乱码 + 0 作品**：`readState()` 对 SQLite 原始字节做正则，二进制垃圾里匹配出含 `workspaceSession{` 的假路径。修复：只走 sqlite3 CLI + 绝对路径存在性校验。
@@ -26,7 +27,12 @@
 ### 交给上游
 
 - `tab create/list` 挂在「当前工作区」解析上的行为已通过显式 `--worktree path:` 规避；根因在宿主 runtime，建议上游关注远程工作区场景的 CLI 超时。
-- 「主题跟随宿主」暂缓：`appearance.read` 要求 `appearance:write` capability（provisional，1.4.249+），为一个只读需求申请写权限并触发重新授权不划算；页面现有 `prefers-color-scheme` 已覆盖主要场景。
+- 「主题跟随宿主」已改为不经 `appearance:write`：项目库服务读取 profile `settings.theme`，首帧写入 `data-host-scheme`；`system` 回退浏览器 `prefers-color-scheme`。上游 `appearance.read` 仅返回 `revision`（用于 conditional `appearance.apply`），不暴露当前 mode；若将来提供只读 mode API，可替换该读取点。
+- **catalog 落后于代码**：0.1.0 条目 pin 在 `cdf1ee1`，此后 7 个提交（含 POST 收口）从未生成新 release。修复：代码提交 C1 → `release-entry` 取 C1 的 commit/hash → catalog 单独提交 C2；安装按 `release.commit` checkout C1，避免 catalog 自引用。
+- **dist 漏打运行时文件**：lite 包缺 `vendor/`，所有 dist 都缺 `tools/thumb.mjs`；`plugin validate` 只校验 manifest 故仍报 valid。修复：`bin/package.sh` 始终打包 `tools/` 与 `vendor/`，并在打包后断言 17 个 runtime 目标存在。
+- **GET 状态变更绕过收口**：`/api/open` 与 `/api/open-url` 留在 GET 白名单，跨站 simple request 可拉起编辑器/触发跳转。修复：移除 GET 状态变更，前端两处改 POST JSON，全部 POST 经 `guardPost`。
+- **超长请求体只断开 socket**：`req.destroy()` 让客户端拿到网络错误而非可判定状态。修复：`content-length` 预检与累计计数都回 413，并 `req.resume()` 排空请求体。
+- **无行为支撑的 capability**：`appearance:write` 仅用于一次 `appearance.read` 日志探测，读取结果只有 `revision`。修复：删除探测与 capability，`engines.orca` 回落到 `>=1.4.248`；主题跟随走 profile 读取，不触发额外授权。
 
 ## 0.3.0 · 2026-11-09（guizang 吸收收尾轮，4+4 Codex worker 编排）
 

@@ -15,6 +15,8 @@
 - **项目管理**：一键创建示例、重命名、删除（二次确认，记录可恢复）、编辑器进程启停/重启。
 - **工作区感知**：精确解析焦点工作区；远程/本机不可见的工作区明确拒绝，不在本机创建影子目录。
 - **点击体验**：状态栏即时显示「⟳ 打开中…」，已有 Tab 直接切换，库页内置加载骨架屏与服务冷启动自动重试。
+- **主题跟随宿主**：读取 Orca `settings.theme` 首帧注入；`system` 时跟随浏览器 `prefers-color-scheme`，也支持 `?scheme=dark|light` 覆盖。
+- **本地接口收口**：状态变更只接受同源 `application/json` POST，GET 无法拉起编辑器或删除作品。
 
 ## 安装
 
@@ -22,7 +24,7 @@
 
 ### 通过 catalog（推荐，可自动更新）
 
-本仓库根目录提供 [`orca-catalog.json`](orca-catalog.json)，条目以 git 源安装，之后 Orca 按 commit 检查更新：
+本仓库根目录提供 [`orca-catalog.json`](orca-catalog.json)，条目以 git 源安装，按 `releases[].commit` 拉取精确版本（最新为 0.2.0）：
 
 ```bash
 cat orca-catalog.json   # 交给 Orca 的 catalog URL / 社区目录收录
@@ -39,7 +41,7 @@ https://github.com/hubo1989/orca-plugin-design.git   ref: main
 ```bash
 git clone https://github.com/hubo1989/orca-plugin-design
 cd orca-plugin-design
-bash bin/package.sh --full        # 组装 ../prototype-studio-dist（含 assets 与 vendored 技能）
+bash bin/package.sh --full        # 组装 ../prototype-studio-dist（lite/full 均含 assets、vendored 技能与缩略图工具）
 # Orca → Settings → Plugins → Install from folder → 选择 ../prototype-studio-dist
 ```
 
