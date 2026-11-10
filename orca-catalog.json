@@ -18,6 +18,98 @@
       ],
       "releases": [
         {
+          "version": "0.2.1",
+          "commit": "3eff2092903a57476e92b5e3bdee36b0e39252e1",
+          "contentHash": "e1d25ce30a7eb9f3d9729671d7c7216acfb9be5aa89aad76f3f8d4521c9f1b05",
+          "execution": "trusted-worker",
+          "minimumOrca": "1.4.248",
+          "name": "Orca-Design",
+          "contributes": [
+            {
+              "kind": "commands",
+              "name": "Open Claude Design Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Claude Slides Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Design System Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Claude Motion Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Claude Dashboard Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Design Gallery"
+            },
+            {
+              "kind": "events",
+              "name": "workspace.changed"
+            },
+            {
+              "kind": "events",
+              "name": "agent.status.changed"
+            },
+            {
+              "kind": "keybindings",
+              "name": "Mod+Alt+P",
+              "detail": "prototype.gallery"
+            },
+            {
+              "kind": "newFiles",
+              "name": "HTML Prototype (.proto.html)",
+              "detail": ".proto.html"
+            },
+            {
+              "kind": "statusBarItems",
+              "name": "Design"
+            }
+          ],
+          "capabilities": [
+            "workspace:read",
+            "agent:read"
+          ],
+          "images": {
+            "icon": {
+              "path": "assets/icon.png",
+              "alt": "Orca-Design",
+              "sha256": "b73953997edbbe05ee8f3e64365f8518d6913313e0a75804537ca38200b678eb",
+              "width": 128,
+              "height": 128
+            },
+            "cover": {
+              "path": "assets/cover.png",
+              "alt": "Orca-Design 项目库：五类设计工具入口与作品卡片",
+              "sha256": "b2c31787397e8916c3dae5217b8b65749fb698957573de2ff36c41879e6d7793",
+              "width": 1600,
+              "height": 1000
+            },
+            "screenshots": [
+              {
+                "path": "assets/gallery.png",
+                "alt": "项目库页面：新建入口与三张作品卡片",
+                "sha256": "8a2497747767e3345a564ad2f6958cab79fad0604073ae79f7a133ea4d01d154",
+                "width": 1280,
+                "height": 800
+              },
+              {
+                "path": "assets/editor.png",
+                "alt": "画布编辑器：无限画布与工具栏",
+                "sha256": "b7aa9266c319b6579df94d5b3b5870d1a5bb88878f765853f60eca280533b0fc",
+                "width": 1280,
+                "height": 800
+              }
+            ]
+          }
+        },
+        {
           "version": "0.2.0",
           "commit": "23f8ef871bf5034b929321b4b6d3db4c3fc059ab",
           "contentHash": "3a343ce6fd3a29ba10c7dbb8c0315a73a002d53d12808ec0608033a8e6a86167",
