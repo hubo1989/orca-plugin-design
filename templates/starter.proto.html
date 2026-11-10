@@ -138,7 +138,7 @@
   </div>
 
   <script>
-  // Prototype Studio Client Enhancement (Works even when opened directly via file://)
+  // Orca-Design Client Enhancement (Works even when opened directly via file://)
   (function() {
     const isFileProto = location.protocol === 'file:';
     const serverOrigin = 'http://127.0.0.1:3456';
@@ -148,7 +148,7 @@
     if (isFileProto) {
       const pill = document.createElement('div');
       pill.style.cssText = 'position:fixed;top:54px;right:24px;background:#1e293b;color:#f8fafc;display:flex;align-items:center;gap:12px;font-size:13px;font-family:sans-serif;z-index:999999;padding:10px 16px;border-radius:10px;border:1px solid rgba(255,255,255,0.2);box-shadow:0 10px 30px rgba(0,0,0,0.4);backdrop-filter:blur(10px);';
-      pill.innerHTML = '<span>🎨 <b>Prototype Studio:</b> 当前处于本地 file:// 查看模式</span>' +
+      pill.innerHTML = '<span>🎨 <b>Orca-Design:</b> 当前处于本地 file:// 查看模式</span>' +
         '<a id="studioSwitchLink" href="' + serverOrigin + '/' + fileName + '" style="color:#ffffff;text-decoration:none;font-weight:600;background:#2563eb;padding:6px 12px;border-radius:6px;box-shadow:0 2px 6px rgba(37,99,235,0.4);display:inline-flex;align-items:center;gap:4px;">进入无限画布工作台 ➔</a>';
       document.body.appendChild(pill);
 
@@ -168,7 +168,7 @@
             link.textContent = '3456 服务离线 (点击查看启动说明) ❓';
             link.onclick = function(e) {
               e.preventDefault();
-              alert('【Prototype Studio 提示】\n\n后台 3456 原型服务尚未启动。\n\n启动方式（无需快捷键）：\n1. 在 Orca 右侧边栏点击「🎨」图标展开 Prototype Studio 面板；\n2. 点击面板上的「打开无限画布工作台」按钮即可自动启动；\n3. 或在 Orca 内置终端中运行：node bin/preview.js');
+              alert('【Orca-Design 提示】\n\n后台 3456 原型服务尚未启动。\n\n启动方式（无需快捷键）：\n1. 在 Orca 右侧边栏点击「🎨」图标展开 Orca-Design 面板；\n2. 点击面板上的「打开无限画布工作台」按钮即可自动启动；\n3. 或在 Orca 内置终端中运行：node bin/preview.js');
             };
           }
         });
@@ -211,7 +211,7 @@
               tagName: target.tagName.toLowerCase()
             })
           }).then(r => r.json()).then(res => {
-            if (res.ok) console.log('[Prototype Studio] Auto saved to local file.');
+            if (res.ok) console.log('[Orca-Design] Auto saved to local file.');
           }).catch(() => {});
         }
       }

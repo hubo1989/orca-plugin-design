@@ -187,7 +187,7 @@ $$\Delta = \max(\text{scrollWidth} - \text{clientWidth},\, \text{scrollHeight} -
     <div class="card">当数据卡片增多超出视口时，底部的绝对定位 footer 会直接压在此处！</div>
   </main>
   <footer class="bad-footer">
-    <p>© 2026 Prototype Studio. All rights reserved.</p>
+    <p>© 2026 Orca-Design. All rights reserved.</p>
   </footer>
 </div>
 
@@ -231,7 +231,7 @@ $$\Delta = \max(\text{scrollWidth} - \text{clientWidth},\, \text{scrollHeight} -
     <div class="card">无论此处置入多少内容，Footer 永远在文档流下方安全顺延，永不压盖。</div>
   </main>
   <footer class="good-footer">
-    <p>© 2026 Prototype Studio. All rights reserved.</p>
+    <p>© 2026 Orca-Design. All rights reserved.</p>
     <div class="footer-actions">
       <button type="button" class="action-btn">系统帮助</button>
     </div>

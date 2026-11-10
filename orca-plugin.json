@@ -1,7 +1,7 @@
 {
   "manifestVersion": 2,
   "id": "prototype-studio",
-  "name": "Prototype Studio",
+  "name": "Orca-Design",
   "version": "0.2.0",
   "execution": "trusted-worker",
   "main": "src/worker.js",
@@ -11,7 +11,7 @@
   "icon": "assets/icon.png",
   "cover": {
     "path": "assets/cover.png",
-    "alt": "Prototype Studio 项目库：五类设计工具入口与作品卡片"
+    "alt": "Orca-Design 项目库：五类设计工具入口与作品卡片"
   },
   "screenshots": [
     {
@@ -67,7 +67,7 @@
         "text": "Design",
         "icon": "layers",
         "tone": "accent",
-        "tooltip": "Prototype Studio · 打开设计项目库",
+        "tooltip": "Orca-Design · 打开设计项目库",
         "command": "prototype.gallery"
       }
     ],

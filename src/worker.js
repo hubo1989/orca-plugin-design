@@ -59,7 +59,7 @@ function orcaTabCreate(url, worktreePath) {
 }
 
 export default async function activate(orca) {
-  orca.log('Prototype Studio worker activating...');
+  orca.log('Orca-Design worker activating...');
 
   // 系统性保险：处理器异常一律转 {ok:false,error}，绝不让 rejection 冒泡到宿主
   // （Orca 只会弹“运行失败”且不给出错信息）。宿主的 orca.commands/panels 是冻结对象，
@@ -507,8 +507,8 @@ function isInstalledPluginPath(target) {
   }
   function galleryLoading(on) {
     sbUpdate(on
-      ? { id: 'gallery', text: '⟳ 打开中…', tone: 'accent', tooltip: 'Prototype Studio · 正在打开项目库' }
-      : { ...SB_IDLE, tooltip: 'Prototype Studio · 打开设计项目库' });
+      ? { id: 'gallery', text: '⟳ 打开中…', tone: 'accent', tooltip: 'Orca-Design · 正在打开项目库' }
+      : { ...SB_IDLE, tooltip: 'Orca-Design · 打开设计项目库' });
   }
   async function openGalleryTab() {
     if (galleryOpenInFlight) return galleryOpenInFlight;
@@ -672,5 +672,5 @@ function isInstalledPluginPath(target) {
   // ① 服务提前拉起（点击时无冷启动）② tab 缓存循环启动（点击走 switch 快路径）
   startTabCacheLoop();
   galleryAlive().then((alive) => { if (!alive) ensureGallery().catch(() => {}); });
-  orca.log('Prototype Studio worker activated successfully.');
+  orca.log('Orca-Design worker activated successfully.');
 }

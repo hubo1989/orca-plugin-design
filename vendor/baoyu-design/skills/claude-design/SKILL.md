@@ -214,9 +214,9 @@ acting on "this artboard" or a selection), `design-system-components.md`, `brand
 canvas: read `make-from-this.md` FIRST.
 
 <!-- prototype-studio:append -->
-## Prototype Studio 插件附注
+## Orca-Design 插件附注
 
-本技能由 Prototype Studio vendored，上游来源见仓库根目录 `vendor/manifest.json`。
+本技能由 Orca-Design vendored，上游来源见仓库根目录 `vendor/manifest.json`。
 
 项目库入口：Orca 状态栏 Design 图标或 `Mod+Alt+P`，也可通过命令面板打开对应编辑器。工作流：从项目库创建或打开作品，在编辑器中编辑，通过顶部返回条回到项目库；详细用法见仓库根目录 `README.md`。
 

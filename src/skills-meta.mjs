@@ -1,4 +1,4 @@
-// Prototype Studio · 技能元数据与共享规范
+// Orca-Design · 技能元数据与共享规范
 // 对齐 baoyu-design v2.12.0 及 dsh-claude-artifacts 规范
 
 export const SKILLS = [
@@ -160,7 +160,7 @@ export const EXAMPLE_TEMPLATES = {
     dirName: 'design-system-demo',
     files: {
       'project/design-system.json': '__INDEX__',
-      'project/README.md': '# 示例设计系统\n\n由 Prototype Studio 创建的示例骨架。让工作区 agent 参考本目录继续完善。\n',
+      'project/README.md': '# 示例设计系统\n\n由 Orca-Design 创建的示例骨架。让工作区 agent 参考本目录继续完善。\n',
       'project/tokens.json': '{}',
     },
   },

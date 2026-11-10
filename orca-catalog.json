@@ -1,6 +1,6 @@
 {
   "catalogVersion": 2,
-  "name": "Prototype Studio",
+  "name": "Orca-Design",
   "owner": "hubo1989",
   "plugins": [
     {
@@ -10,7 +10,7 @@
         "url": "https://github.com/hubo1989/orca-plugin-design.git",
         "ref": "main"
       },
-      "description": "Prototype Studio — 五类设计作品（幻灯片/设计/设计系统/看板/动效）在一个项目库 Tab 中管理",
+      "description": "Orca-Design — 五类设计作品（幻灯片/设计/设计系统/看板/动效）在一个项目库 Tab 中管理",
       "homepage": "https://github.com/hubo1989/orca-plugin-design",
       "categories": [
         "design",
