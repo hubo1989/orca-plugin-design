@@ -8,7 +8,7 @@ import os from 'node:os';
 
 if (!process.env.ORCA_CLI_COMMAND) {
   const mockCli = path.join(os.tmpdir(), 'mock-orca-cli.sh');
-  fs.writeFileSync(mockCli, '#!/bin/sh\nif [ "$1" = "tab" ] && [ "$2" = "list" ]; then echo \'{"result":{"tabs":[]}}\'; exit 0; fi\nif [ "$1" = "tab" ] && [ "$2" = "create" ]; then echo \'{"result":{"tabId":"mock"}}\'; exit 0; fi\necho \'{}\'\n', { mode: 0o755 });
+  fs.writeFileSync(mockCli, '#!/bin/sh\ncase "$1 $2" in\n  "tab list") echo \'{"ok":true,"result":{"tabs":[]}}\' ;;\n  "tab create") echo \'{"ok":true,"result":{"browserPageId":"mock"}}\' ;;\n  "tab switch") echo \'{"ok":true,"result":{"switched":0,"browserPageId":"mock"}}\' ;;\n  "tab current") echo \'{"ok":true,"result":{"tab":{"browserPageId":"mock","active":true}}}\' ;;\n  *) echo \'{"ok":true,"result":{}}\' ;;\nesac\n', { mode: 0o755 });
   process.env.ORCA_CLI_COMMAND = mockCli;
 }
 

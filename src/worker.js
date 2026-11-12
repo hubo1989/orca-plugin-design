@@ -36,30 +36,71 @@ function runNode(args) {
   });
 }
 
-// Orca CLI 通用执行器（tab list/switch 用）。错误一律 resolve、绝不 reject，
+// Orca CLI 通用执行器（tab list/switch/current 用）。错误一律 resolve、绝不 reject，
 // 让 tab 复用检查的任何失败都退化为“新建 tab”路径，而不是让命令失败。
-function orcaTab(args) {
+function orcaTab(args, timeout = 3000) {
   return new Promise((resolve) => {
-    execFile(ORCA_BIN, args, { timeout: 3000 }, (err, stdout, stderr) => {
+    execFile(ORCA_BIN, args, { timeout }, (err, stdout, stderr) => {
       resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') });
     });
   });
 }
 
-function orcaTabCreate(url, worktreePath) {
+// CLI 偶有前后缀日志；优先整体解析，失败时截取第一个 JSON 对象。
+function parseOrcaJson(stdout) {
+  const text = String(stdout || '').trim();
+  if (!text) return null;
+  try { return JSON.parse(text); } catch {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+  }
+}
+function orcaResult(payload) {
+  return payload && payload.ok === false ? null : (payload?.result ?? null);
+}
+function focusedFromHostContext(ctx, workspaces) {
+  // readContext 不带 path；用它返回的 branch/displayName 在 workspace.list 中唯一命中。
+  // 这不是猜测：两个字段都来自宿主当前焦点上下文，且只有唯一候选才接受。
+  if (!ctx || !Array.isArray(workspaces)) return null;
+  const branch = String(ctx.branch || '');
+  const name = String(ctx.displayName || '');
+  const normalizeBranch = (b) => String(b || '').replace(/^refs\/heads\//, '');
+  const candidates = workspaces.filter((w) =>
+    normalizeBranch(w.branch) === normalizeBranch(branch) && String(w.name || '') === name);
+  return candidates.length === 1 ? candidates[0] : null;
+}
+function browserPageId(result) {
+  return result?.browserPageId || result?.tab?.browserPageId || result?.tabId || null;
+}
+
+function orcaTabCreate(url, worktreePath, { split = false } = {}) {
   // 显式 --worktree：不指定时 CLI 走“当前工作区”解析，在远程/非本机工作区
-  // 场景会挂起或落到错误宿主。失败时带回 stderr，供日志定位。
-  const args = ['tab', 'create', '--url', url, '--split', 'right'];
+  // 场景会挂起或落到错误宿主。--json 让调用方拿到 browserPageId 做可见性校验。
+  const args = ['tab', 'create', '--url', url, '--json'];
+  // --split right 只把页面开在终端旁的新 pane 且焦点留在终端；项目库点击不用它。
+  if (split) args.push('--split', 'right');
   if (worktreePath) args.push('--worktree', `path:${worktreePath}`);
   return new Promise((resolve) => {
     execFile(ORCA_BIN, args, { timeout: 8000 }, (err, stdout, stderr) => {
-      resolve(err ? `${err.message}${stderr ? ` :: ${String(stderr).slice(0, 200)}` : ''}` : null);
+      if (err) {
+        resolve({ pageId: null, error: `${err.message}${stderr ? ` :: ${String(stderr).slice(0, 200)}` : ''}` });
+        return;
+      }
+      const result = orcaResult(parseOrcaJson(stdout));
+      const pageId = browserPageId(result);
+      if (!pageId) {
+        resolve({ pageId: null, error: `tab create returned no browserPageId: ${String(stdout).slice(0, 200)}` });
+        return;
+      }
+      resolve({ pageId, error: null });
     });
   });
 }
 
 export default async function activate(orca) {
-  orca.log('Orca-Design worker activating...');
+  orca.log('Lakala-Design-Plugin worker activating...');
 
   // 系统性保险：处理器异常一律转 {ok:false,error}，绝不让 rejection 冒泡到宿主
   // （Orca 只会弹“运行失败”且不给出错信息）。宿主的 orca.commands/panels 是冻结对象，
@@ -81,6 +122,14 @@ export default async function activate(orca) {
   let workspaceRoot = '';
   let workspaceName = '';
   let openedWorkspaces = [];
+  // Tab 缓存状态提前声明：workspace.changed 在 activate 早期注册，宿主可能在注册时
+  // 立刻投递一次事件；此时必须能安全清空缓存，不能触及 TDZ。
+  let cachedGalleryPageId = null;
+  let cachedPageWsRoot = '';
+  function invalidateGalleryTabCache() {
+    cachedGalleryPageId = null;
+    cachedPageWsRoot = '';
+  }
 
 // 真实安装路径：Orca 把插件复制到 <userData>/plugins/<pluginKey>/<hash>/。
 // 只有工作区等于/位于安装根目录内部时才拒绝写入；源码 worktree、dist 打包源都不是安装路径。
@@ -97,7 +146,20 @@ function isInstalledPluginPath(target) {
 }
 
   const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
-  function writeState() { /* 状态由项目库服务自行从 Orca profile 库解析，worker 不再写入 */ }
+  // 点击时把实时焦点写入短时效 state；库页服务优先消费它，避免读旧 profile DB。
+  function writeState(root = workspaceRoot, name = workspaceName) {
+    if (!root) return;
+    const tmp = `${STATE_FILE}.tmp`;
+    try {
+      fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+      fs.writeFileSync(tmp, JSON.stringify({
+        workspaceRoot: root,
+        workspaceName: name || root.split('/').filter(Boolean).pop() || '',
+        updatedAt: Date.now(),
+      }));
+      fs.renameSync(tmp, STATE_FILE);
+    } catch { /* 库页服务仍可回退 profile DB；不能让状态文件失败拖垮命令 */ }
+  }
 
   async function refreshWorkspaces() {
     try {
@@ -177,6 +239,27 @@ function isInstalledPluginPath(target) {
     return null;
   }
 
+  async function focusedFromWorktreePs() {
+    const r = await orcaTab(['worktree', 'ps', '--json'], 3000);
+    if (r.err) return null;
+    const worktrees = orcaResult(parseOrcaJson(r.stdout))?.worktrees || [];
+    const active = worktrees.find((w) => w?.isActive === true && w.path);
+    if (active) return { path: active.path, name: active.displayName || active.path.split('/').filter(Boolean).pop() || '' };
+    const ranked = worktrees
+      .filter((w) => w?.path && Number.isFinite(Number(w.lastActivityAt)))
+      .sort((a, b) => Number(b.lastActivityAt) - Number(a.lastActivityAt));
+    return ranked[0] ? { path: ranked[0].path, name: ranked[0].displayName || ranked[0].path.split('/').filter(Boolean).pop() || '' } : null;
+  }
+  async function resolveLiveFocusedWorkspace() {
+    await refreshWorkspaces();
+    const ctx = await orca.host.call('workspace.readContext').catch(() => null);
+    const fromHost = focusedFromHostContext(ctx, openedWorkspaces);
+    if (fromHost?.path) return fromHost;
+    const fromPs = await focusedFromWorktreePs();
+    if (fromPs?.path) return fromPs;
+    return resolveFocusedWorkspace();
+  }
+
   const focusedAtStart = await resolveFocusedWorkspace();
   workspaceRoot = focusedAtStart?.path ?? '';
   workspaceName = focusedAtStart?.name ?? '';
@@ -195,6 +278,7 @@ function isInstalledPluginPath(target) {
       if (generation !== workspaceGeneration) return;
       const nextRoot = hit?.path ?? '';
       if (nextRoot !== workspaceRoot) {
+        invalidateGalleryTabCache();
         workspaceRoot = nextRoot;
         workspaceName = hit?.name ?? '';
         writeState();
@@ -211,6 +295,7 @@ function isInstalledPluginPath(target) {
     });
     orca.events.on('workspace.changed', async () => {
       const generation = ++workspaceGeneration;
+      invalidateGalleryTabCache();
       workspaceRoot = '';
       workspaceName = '';
       const hit = await resolveFocusedWorkspace();
@@ -287,9 +372,9 @@ function isInstalledPluginPath(target) {
     openEditors.set(root, { skill: skillId, url });
     orca.log(`Skill editor up: ${skillId} -> ${url}`);
 
-    const tabError = await orcaTabCreate(url, workspaceRoot || undefined);
-    if (tabError) orca.log(`Browser tab create failed: ${tabError}`);
-    return { ok: true, url, ...(tabError ? { tabError } : {}) };
+    const created = await orcaTabCreate(url, workspaceRoot || undefined, { split: true });
+    if (created.error) orca.log(`Browser tab create failed: ${created.error}`);
+    return { ok: true, url, ...(created.error ? { tabError: created.error } : {}) };
   }
 
   async function stopSkillEditor(skillId, root) {
@@ -311,8 +396,9 @@ function isInstalledPluginPath(target) {
     if (!tpl) {
       return { ok: false, error: `${skillId} 项目由 agent 创建（本类型无静态示例模板）` };
     }
+    const targetSkill = tpl.skill || skillId;
     // 设计系统按项目全局唯一：一个工作区只允许一套统一规范
-    if (skillId === 'claude-design-system') {
+    if (targetSkill === 'claude-design-system') {
       const existing = scanDesignProjects(workspaceRoot || wsPath)['claude-design-system'] || [];
       if (existing.length > 0) {
         return { ok: false, error: '当前工作区已有设计系统（全项目统一参考）；如需更换请先删除' };
@@ -355,7 +441,7 @@ function isInstalledPluginPath(target) {
         const p = path.join(root, rel);
         fs.mkdirSync(path.dirname(p), { recursive: true });
         if (content === '__INDEX__') {
-          const idx = { ...EXAMPLE_INDEX[skillId], createdOnFiles: { v: 1, at: now }, title: name,
+          const idx = { ...EXAMPLE_INDEX[skillId], createdOnFiles: { v: 1, at: now }, title: safe ? name : (tpl.title || name),
             lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Example scaffold' } };
           fs.writeFileSync(p, JSON.stringify(idx, null, 2));
         } else {
@@ -365,7 +451,7 @@ function isInstalledPluginPath(target) {
     } catch (err) {
       return { ok: false, error: `项目写入失败（${err.code || ''} ${err.message}）：${root}` };
     }
-    const r = await runNode([artifactCli(skillId), 'check', root]);
+    const r = await runNode([artifactCli(targetSkill), 'check', root]);
     let problems = null;
     try { problems = JSON.parse(r.stdout).problems ?? null; } catch { /* keep null */ }
     orca.log(`Example created: ${root} (problems=${problems})`);
@@ -466,37 +552,87 @@ function isInstalledPluginPath(target) {
   let lastGalleryOpenAt = 0;
   // 即时反馈：点击后状态栏条目立刻变「打开中」，完成/失败后恢复。
   // statusBar.update 自 Orca 1.4.248 提供（plugin-private，无需 capability）；失败静默忽略。
-  // tab 复用快路径：worker 常驻期间轮询缓存 tab 列表（30s 一次 + 打开后立即刷新），
-  // 点击时若缓存里已有库页 tab 直接 switch——完全绕开 tab list 挂起（实测重装重启瞬间
-  // CLI 子进程可挂 8s）。switch 失败再回退 create。
-  let cachedGalleryPageId = null;
-  let cachedPageWsRoot = ''; // 缓存归属的工作区：切工作区即失效
+  // tab 快路径：缓存只服务“同工作区、URL 匹配、已验证为当前 Tab”的 page id。
+  // 切工作区、缓存刷新跨过工作区切换、switch/current 失败都不得产生 ok:true 假成功。
   let tabCacheTimer = null;
-  function tabListArgs() {
-    // 显式 --worktree：list/switch/create 都锚定当前焦点工作区，
-    // 避免“当前工作区”在远程/非本机场景解析挂起或落错宿主
-    return workspaceRoot
-      ? ['tab', 'list', '--json', '--worktree', `path:${workspaceRoot}`]
-      : ['tab', 'list', '--json'];
+  function worktreeScopeArgs(openRoot) {
+    return openRoot ? ['--worktree', `path:${openRoot}`] : [];
   }
-  async function refreshTabCache() {
-    if (cachedPageWsRoot !== (workspaceRoot || '')) {
+  function tabListArgs(openRoot) {
+    // 显式 --worktree：list/switch/current/create 都锚定本次点击的实时焦点工作区。
+    return ['tab', 'list', '--json', ...worktreeScopeArgs(openRoot)];
+  }
+  function tabCurrentArgs(openRoot) {
+    return ['tab', 'current', '--json', ...worktreeScopeArgs(openRoot)];
+  }
+  function worktreeActivateArgs(openRoot) {
+    return ['worktree', 'activate', ...worktreeScopeArgs(openRoot), '--json'];
+  }
+  async function refreshTabCache(openRoot) {
+    // 记录请求时的工作区：异步 list 返回时若焦点已切走，丢弃结果，避免写入旧 id。
+    const requestedWsRoot = openRoot || '';
+    if (cachedPageWsRoot !== requestedWsRoot) {
       cachedGalleryPageId = null;
-      cachedPageWsRoot = workspaceRoot || '';
+      cachedPageWsRoot = requestedWsRoot;
     }
-    const r = await orcaTab(tabListArgs());
-    if (r.err) return;
-    try {
-      const tabs = JSON.parse(r.stdout).result?.tabs || [];
-      const hit = tabs.find((t) => String(t.url || '').startsWith(GALLERY_URL));
-      cachedGalleryPageId = hit ? hit.browserPageId : null;
-    } catch { cachedGalleryPageId = null; }
+    const r = await orcaTab(tabListArgs(openRoot));
+    if (r.err || cachedPageWsRoot !== requestedWsRoot) return;
+    const tabs = orcaResult(parseOrcaJson(r.stdout))?.tabs || [];
+    const hit = tabs.find((t) => String(t.url || '').startsWith(GALLERY_URL));
+    cachedGalleryPageId = hit ? hit.browserPageId || null : null;
   }
   function startTabCacheLoop() {
     if (tabCacheTimer) return;
-    refreshTabCache().catch(() => {});
-    tabCacheTimer = setInterval(() => refreshTabCache().catch(() => {}), 30000);
+    tabCacheTimer = setInterval(() => {
+      resolveLiveFocusedWorkspace()
+        .then((hit) => refreshTabCache(hit?.path || ''))
+        .catch(() => {});
+    }, 30000);
     tabCacheTimer.unref?.();
+  }
+  // switch 会改变 scoped worktree 的 active tab；--focus 负责把 browser pane 提到前台。
+  // 这里只使用 openRoot 快照：用户切走工作区后，后续异步步骤不得把宿主拉回旧工作区。
+  async function revealGalleryTab(pageId, label, lap, openRoot) {
+    const activated = openRoot ? await orcaTab(worktreeActivateArgs(openRoot), 8000) : null;
+    if (activated?.err) {
+      orca.log(`gallery worktree-activate failed: ${activated.err.message || activated.err}`);
+      return null;
+    }
+    const sw = await orcaTab(['tab', 'switch', '--page', pageId, ...worktreeScopeArgs(openRoot), '--focus', '--json']);
+    lap(label);
+    if (sw.err) {
+      orca.log(`gallery ${label} failed: ${sw.err.message || sw.err}`);
+      return null;
+    }
+    const switchedId = browserPageId(orcaResult(parseOrcaJson(sw.stdout))) || pageId;
+    const cur = await orcaTab(tabCurrentArgs(openRoot));
+    if (cur.err) {
+      orca.log(`gallery tab-current failed: ${cur.err.message || cur.err}`);
+      return null;
+    }
+    const currentId = browserPageId(orcaResult(parseOrcaJson(cur.stdout)));
+    if (!currentId || currentId !== switchedId) {
+      orca.log(`gallery tab not current after ${label}: expected ${switchedId}, got ${currentId || '(none)'}`);
+      return null;
+    }
+    cachedGalleryPageId = currentId;
+    cachedPageWsRoot = openRoot || '';
+    return currentId;
+  }
+  async function createAndRevealGalleryTab(lap, openRoot) {
+    const created = await orcaTabCreate(GALLERY_URL, openRoot || undefined);
+    lap('tab-create');
+    if (created.error) {
+      orca.log(`gallery tab-create failed: ${created.error}`);
+      return { ok: false, error: created.error };
+    }
+    const pageId = await revealGalleryTab(created.pageId, 'tab-switch(created)', lap, openRoot);
+    if (!pageId) {
+      // 新 Tab 已创建，但无法证明它是当前 Tab；报告失败，让调用方能重试而不是静默假成功。
+      return { ok: false, error: 'gallery tab created but visibility verification failed' };
+    }
+    lastGalleryOpenAt = Date.now();
+    return { ok: true, reused: false, pageId, workspaceRoot: openRoot };
   }
   const SB_IDLE = { id: 'gallery', text: 'Design', icon: 'layers', tone: 'accent' };
   function sbUpdate(patch) {
@@ -507,17 +643,11 @@ function isInstalledPluginPath(target) {
   }
   function galleryLoading(on) {
     sbUpdate(on
-      ? { id: 'gallery', text: '⟳ 打开中…', tone: 'accent', tooltip: 'Orca-Design · 正在打开项目库' }
-      : { ...SB_IDLE, tooltip: 'Orca-Design · 打开设计项目库' });
+      ? { id: 'gallery', text: '⟳ 打开中…', tone: 'accent', tooltip: 'Lakala-Design-Plugin · 正在打开项目库' }
+      : { ...SB_IDLE, tooltip: 'Lakala-Design-Plugin · 打开设计项目库' });
   }
   async function openGalleryTab() {
     if (galleryOpenInFlight) return galleryOpenInFlight;
-    // 远程工作区：路径本机不可见 → 服务扫不到任何项目，tab 操作也只会挂起/失败。
-    // 明确拒绝并给出原因，不浪费 3s 超时，也不开一个永远空的库页。
-    if (workspaceRoot && (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory())) {
-      orca.log(`gallery blocked: workspace not visible locally: ${workspaceRoot}`);
-      return { ok: false, error: `远程/本机不可见的工作区暂不支持项目库（仅支持本机工作区）：${workspaceRoot}` };
-    }
     // 节流只在“上次成功打开”后 2 秒内生效：失败后的立即重试不被吞掉
     if (Date.now() - lastGalleryOpenAt < 2000) return { ok: true, reused: true, throttled: true };
     const T0 = Date.now();
@@ -526,48 +656,57 @@ function isInstalledPluginPath(target) {
     galleryOpenInFlight = (async () => {
       try {
         lap('start');
-        // 原则：无论什么状态，先把面板打开（加载屏在库页内自行显示并轮询就位）。
-        // 服务探测/spawn、tab 缓存刷新全部不阻塞“切换/新建 tab”这一步。
-        ensureGallery().catch((e) => orca.log(`gallery ensure: ${e.message}`)); // 后台拉起服务
-        refreshTabCache().catch(() => {}); // 后台刷新缓存，供下次点击走快路径
-
-        // 快路径①：缓存里已知库页 tab → 直接 switch（绕过 tab list）
-        if (cachedGalleryPageId) {
-          const sw = await orcaTab(['tab', 'switch', '--page', cachedGalleryPageId, '--focus']);
-          lap('tab-switch(cached)');
-          if (!sw.err) {
-            lastGalleryOpenAt = Date.now();
-            return { ok: true, reused: true };
-          }
-          cachedGalleryPageId = null; // 缓存失效
+        // 点击时解析实时焦点并快照：整次 list/switch/create/current 都用同一个 root，
+        // 不再读取可能在 await 之间被 workspace.changed 改写的全局 workspaceRoot。
+        const live = await resolveLiveFocusedWorkspace();
+        const openRoot = live?.path || '';
+        const openName = live?.name || live?.displayName || workspaceName;
+        lap('focus');
+        if (!openRoot) return { ok: false, error: '当前工作区未识别' };
+        if (!fs.existsSync(openRoot) || !fs.statSync(openRoot).isDirectory()) {
+          orca.log(`gallery blocked: workspace not visible locally: ${openRoot}`);
+          return { ok: false, error: `远程/本机不可见的工作区暂不支持项目库（仅支持本机工作区）：${openRoot}` };
         }
-        // 快路径②：现场 list（超时 3s），找到库页 tab 就 switch；失败原因落日志
+        workspaceRoot = openRoot;
+        workspaceName = openName || workspaceName;
+        writeState(openRoot, workspaceName);
+        if (cachedPageWsRoot !== openRoot) invalidateGalleryTabCache();
+        cachedPageWsRoot = openRoot;
+
+        // 服务探测/spawn 不阻塞“切换/新建 tab”；缓存刷新串行完成后才走快路径。
+        ensureGallery().catch((e) => orca.log(`gallery ensure: ${e.message}`)); // 后台拉起服务
+        await refreshTabCache(openRoot).catch(() => {});
+        lap('tab-cache');
+
+        // 快路径①：缓存里已知同工作区库页 tab → switch + current 校验。
+        if (cachedGalleryPageId) {
+          const pageId = await revealGalleryTab(cachedGalleryPageId, 'tab-switch(cached)', lap, openRoot);
+          if (pageId) {
+            lastGalleryOpenAt = Date.now();
+            return { ok: true, reused: true, pageId, workspaceRoot: openRoot };
+          }
+          cachedGalleryPageId = null; // 缓存失效，继续现场 list / create
+        }
+        // 快路径②：现场 list（超时 3s），找到库页 tab 就验证可见性；失败原因落日志
         try {
-          const listed = await orcaTab(tabListArgs());
+          const listed = await orcaTab(tabListArgs(openRoot));
           lap('tab-list');
           if (listed.err) {
             orca.log(`gallery tab-list failed: ${listed.err.message || listed.err}${listed.stderr ? ` :: ${listed.stderr.slice(0, 160)}` : ''}`);
           } else {
-            const tabs = JSON.parse(listed.stdout).result?.tabs || [];
+            const tabs = orcaResult(parseOrcaJson(listed.stdout))?.tabs || [];
             const hit = tabs.find((t) => String(t.url || '').startsWith(GALLERY_URL));
             if (hit) {
-              const sw = await orcaTab(['tab', 'switch', '--page', hit.browserPageId, '--focus']);
-              lap('tab-switch');
-              if (!sw.err) { lastGalleryOpenAt = Date.now(); return { ok: true, reused: true }; }
-              orca.log(`gallery tab switch failed, creating new: ${sw.err.message || sw.err}`);
+              const pageId = await revealGalleryTab(hit.browserPageId, 'tab-switch', lap, openRoot);
+              if (pageId) {
+                lastGalleryOpenAt = Date.now();
+                return { ok: true, reused: true, pageId, workspaceRoot: openRoot };
+              }
             }
           }
         } catch { /* fall through to create */ }
-        // 最后一步：新建 tab（加载屏由库页自身展示）；失败原因落日志供定位
-        const tabError = await orcaTabCreate(GALLERY_URL, workspaceRoot || undefined);
-        if (!tabError) refreshTabCache().catch(() => {});
-        lap('tab-create');
-        if (tabError) {
-          orca.log(`gallery tab-create failed: ${tabError}`);
-          return { ok: false, error: tabError };
-        }
-        lastGalleryOpenAt = Date.now();
-        return { ok: true, reused: false };
+        // 最后一步：新建 tab，解析 page id → switch → current 校验；失败原因落日志供定位
+        return await createAndRevealGalleryTab(lap, openRoot);
       } finally {
         galleryOpenInFlight = null;
         galleryLoading(false);
@@ -672,5 +811,5 @@ function isInstalledPluginPath(target) {
   // ① 服务提前拉起（点击时无冷启动）② tab 缓存循环启动（点击走 switch 快路径）
   startTabCacheLoop();
   galleryAlive().then((alive) => { if (!alive) ensureGallery().catch(() => {}); });
-  orca.log('Orca-Design worker activated successfully.');
+  orca.log('Lakala-Design-Plugin worker activated successfully.');
 }

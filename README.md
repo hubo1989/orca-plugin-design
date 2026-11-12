@@ -1,6 +1,6 @@
-# Orca-Design
+# Lakala-Design-Plugin
 
-![Orca-Design 项目库](assets/cover.png)
+![Lakala-Design-Plugin 项目库](assets/cover.png)
 
 把 Anthropic 风格的设计工具链带进 Orca 工作区：**幻灯片、设计、设计系统、看板、动效**五类作品，状态栏一个图标（或 `Mod+Alt+P`）打开项目库，库内创建、打开、重命名、删除，编辑器在同一 Tab 内跳转。
 

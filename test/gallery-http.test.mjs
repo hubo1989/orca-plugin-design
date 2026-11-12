@@ -84,6 +84,37 @@ test('host theme is injected into the first paint', () => {
   assert.match(galleryHtml('en', 'light'), /data-host-scheme="light"/);
 });
 
+test('POST /api/create, GET /api/preview wrapper, and POST /api/forget allMissing work over HTTP', async () => {
+  fs.writeFileSync(stateFile, JSON.stringify({
+    workspaceRoot: wsDir,
+    workspaceName: 'test-workspace',
+    updatedAt: Date.now(),
+  }));
+  const created = await hit('/api/create', {
+    method: 'POST',
+    headers: postHeaders(),
+    body: JSON.stringify({ skill: 'claude-slides' }),
+  });
+  assert.equal(created.status, 200);
+  const createdJson = JSON.parse(created.text);
+  assert.equal(createdJson.ok, true);
+  assert.equal(createdJson.problems, 0);
+
+  const preview = await hit(`/api/preview?skill=claude-slides&root=${encodeURIComponent(createdJson.root)}`);
+  assert.equal(preview.status, 200);
+  assert.match(preview.text, /<!doctype html>/i);
+  assert.match(preview.text, /slide-stage/);
+
+  fs.rmSync(createdJson.root, { recursive: true, force: true });
+  const cleared = await hit('/api/forget', {
+    method: 'POST',
+    headers: postHeaders(),
+    body: JSON.stringify({ allMissing: true }),
+  });
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(JSON.parse(cleared.text), { ok: true, removed: 1 });
+});
+
 test.after(async () => {
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(tmpDir, { recursive: true, force: true });

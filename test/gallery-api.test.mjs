@@ -13,7 +13,8 @@ fs.mkdirSync(designHome, { recursive: true });
 process.env.ORCA_DESIGN_HOME = designHome;
 process.env.ORCA_STATE_FILE = path.join(tmpDir, 'prototype-studio-state.json');
 const stateFile = process.env.ORCA_STATE_FILE;
-fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot: wsDir, workspaceName: 'test-workspace' }));
+// worker 的 writeState 现在带 updatedAt；readState 只认 15s 内的快照，否则回退 profile DB。
+fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot: wsDir, workspaceName: 'test-workspace', updatedAt: Date.now() }));
 
 const {
   listArtifactsViews,
@@ -23,20 +24,38 @@ const {
   restoreArtifact,
   findArtifact,
   writeRecord,
+  forgetMissingArtifacts,
+  previewEntry,
   galleryHtml,
 } = await import('../src/gallery-server.mjs');
 
-test('gallery HTML renders dsh-claude-artifacts compatible elements and styles', () => {
+function refreshWorkspaceState() {
+  fs.writeFileSync(stateFile, JSON.stringify({
+    workspaceRoot: wsDir,
+    workspaceName: 'test-workspace',
+    updatedAt: Date.now(),
+  }));
+}
+
+test('gallery HTML renders studio layout, Lakala design system stage, and valid client script', () => {
   const html = galleryHtml();
   assert.ok(html.includes('.bda-page'), 'Contains .bda-page class');
   assert.ok(html.includes('.bda-tiles'), 'Contains .bda-tiles class');
   assert.ok(html.includes('.bda-grid'), 'Contains .bda-grid class');
   assert.ok(html.includes('--dsw-alias-bg-base'), 'Contains --dsw-alias-bg-base CSS variable');
+  assert.ok(html.includes('id="sec-ds"'), 'Contains dedicated design system stage');
+  assert.ok(html.includes('#00b9f1'), 'Includes Lakala brand cyan token');
   assert.ok(html.includes('claude-slides'), 'Supports claude-slides');
   assert.ok(html.includes('claude-design'), 'Supports claude-design');
   assert.ok(html.includes('claude-design-system'), 'Supports claude-design-system');
   assert.ok(html.includes('claude-dashboard'), 'Supports claude-dashboard');
   assert.ok(html.includes('claude-motion'), 'Supports claude-motion');
+
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  assert.equal(scripts.length, 2, 'Contains head bootstrap script and main studio script');
+  for (const code of scripts) {
+    assert.doesNotThrow(() => new Function(code), 'Inline client script compiles without syntax error');
+  }
 });
 
 test('gallery lifecycle: create -> scan -> update -> trash -> restore', async () => {
@@ -86,7 +105,66 @@ test('gallery lifecycle: create -> scan -> update -> trash -> restore', async ()
   const afterRestore = listArtifactsViews();
   assert.equal(afterRestore.artifacts.length, 1);
   assert.equal(afterRestore.artifacts[0].title, 'Renamed Canvas');
+});
 
-  // 清理
+test('built-in Lakala design system and curated templates pass artifact checks and resolve cover previews', async () => {
+  refreshWorkspaceState();
+  const ds = await createExample('claude-design-system');
+  assert.equal(ds.ok, true);
+  assert.equal(ds.problems, 0);
+  const tokens = JSON.parse(fs.readFileSync(path.join(ds.root, 'project', 'tokens.json'), 'utf8'));
+  const primary = tokens.color.tokens.find((t) => t.name === 'brand-primary');
+  assert.equal(primary?.value, '#00b9f1');
+  assert.match(previewEntry(ds.root, 'claude-design-system') || '', /Cover[\\/]preview\.html$/);
+
+  const deck = await createExample('claude-slides');
+  assert.equal(deck.ok, true);
+  assert.equal(deck.problems, 0);
+  assert.match(previewEntry(deck.root, 'claude-slides') || '', /cover\.html$/);
+
+  const mobile = await createExample('lakala-mobile');
+  assert.equal(mobile.ok, true);
+  assert.equal(mobile.skill, 'claude-design');
+  assert.equal(mobile.problems, 0);
+});
+
+test('missing artifact governance: detect missing, auto-heal when restored, and batch forget stale records', async () => {
+  refreshWorkspaceState();
+  const created = await createExample('lakala-poster', 'temp-poster');
+  assert.equal(created.ok, true);
+
+  // Pin it and remove its folder from disk: valid items must still rank ahead of missing records.
+  const rec = findArtifact(created.root);
+  rec.pinned = true;
+  writeRecord(rec);
+  const backupPath = path.join(tmpDir, 'moved-outside-workspace');
+  fs.renameSync(created.root, backupPath);
+
+  const whileMissing = listArtifactsViews();
+  const missingView = whileMissing.artifacts.find((a) => a.root === created.root);
+  assert.ok(missingView);
+  assert.equal(missingView.missing, true);
+  assert.equal(missingView.openable, false);
+  assert.equal(whileMissing.artifacts[0].missing, false, 'Pinned missing item never outranks valid projects');
+
+  // Restore folder: missing flag heals automatically.
+  fs.renameSync(backupPath, created.root);
+  const healed = listArtifactsViews();
+  const healedView = healed.artifacts.find((a) => a.root === created.root);
+  assert.equal(healedView?.missing, false);
+
+  // Delete folder permanently and batch-forget stale records.
+  fs.rmSync(created.root, { recursive: true, force: true });
+  assert.equal(listArtifactsViews().artifacts.some((a) => a.missing), true);
+  const cleaned = forgetMissingArtifacts();
+  assert.equal(cleaned.ok, true);
+  assert.equal(cleaned.removed, 1);
+
+  const afterForget = listArtifactsViews();
+  assert.equal(afterForget.artifacts.some((a) => a.missing), false);
+  assert.ok(afterForget.artifacts.length >= 4, 'Valid projects remain intact');
+});
+
+test.after(() => {
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 });

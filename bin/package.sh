@@ -43,6 +43,8 @@ manifest = json.loads((out / "orca-plugin.json").read_text())
 required = [
     manifest["main"],
     "src/gallery-server.mjs",
+    "src/gallery-ui.mjs",
+    "src/builtin-library.mjs",
     "src/post-guard.mjs",
     "src/skills-meta.mjs",
     "src/examples.json",
