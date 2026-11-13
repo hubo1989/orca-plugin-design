@@ -10,12 +10,18 @@ import {
   ROOT_MARKERS,
   EXAMPLE_TEMPLATES,
   EXAMPLE_INDEX,
+  resolveHostCli,
+  resolveHostUserData,
+  resolveProfileDb,
+  computeGalleryBuildId,
 } from './skills-meta.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 
-const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
+const HOST_USER_DATA = resolveHostUserData(pluginRoot);
+const ORCA_BIN = resolveHostCli(pluginRoot);
+const EXPECTED_BUILD_ID = computeGalleryBuildId(pluginRoot);
 
 // Design skills vendored from JimLiu/baoyu-design.
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
@@ -131,13 +137,10 @@ export default async function activate(orca) {
     cachedPageWsRoot = '';
   }
 
-// 真实安装路径：Orca 把插件复制到 <userData>/plugins/<pluginKey>/<hash>/。
+// 真实安装路径：宿主把插件复制到 <userData>/plugins/<pluginKey>/<hash>/。
 // 只有工作区等于/位于安装根目录内部时才拒绝写入；源码 worktree、dist 打包源都不是安装路径。
 function installRoot() {
-  const home = process.env.HOME || os.homedir();
-  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'orca', 'plugins');
-  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca', 'plugins');
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'orca', 'plugins');
+  return path.join(HOST_USER_DATA, 'plugins');
 }
 function isInstalledPluginPath(target) {
   const root = path.resolve(installRoot());
@@ -154,7 +157,7 @@ function isInstalledPluginPath(target) {
       fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
       fs.writeFileSync(tmp, JSON.stringify({
         workspaceRoot: root,
-        workspaceName: name || root.split('/').filter(Boolean).pop() || '',
+        workspaceName: name || path.basename(root) || '',
         updatedAt: Date.now(),
       }));
       fs.renameSync(tmp, STATE_FILE);
@@ -190,9 +193,9 @@ function isInstalledPluginPath(target) {
     return openedWorkspaces.find((w) => w.id === s || (pathPart && w.path === pathPart)) || null;
   }
 
-  // 焦点解析优先读 Orca profile 库的 activeWorktreeId（权威、即时，格式 <uuid>::<path>），
+  // 焦点解析优先读宿主 profile 库的 activeWorktreeId（权威、即时，格式 <uuid>::<path>），
   // 消除 agent 事件桥接的冷启动等待；事件桥与唯一字段匹配仅作回退。
-  const PROFILE_DB = process.env.ORCA_PROFILE_DB || path.join(os.homedir(), 'Library', 'Application Support', 'orca', 'profiles', 'local-default', 'profile-state.db');
+  const PROFILE_DB = resolveProfileDb(pluginRoot);
 
   function focusedFromProfile() {
     try {
@@ -203,7 +206,7 @@ function isInstalledPluginPath(target) {
       const id = ws.activeWorktreeId || '';
       const p = id.includes('::') ? id.split('::').pop() : '';
       if (!p) return null;
-      return { path: p, name: p.split('/').filter(Boolean).pop() || '' };
+      return { path: p, name: path.basename(p) || '' };
     } catch {
       return null;
     }
@@ -221,21 +224,25 @@ function isInstalledPluginPath(target) {
     }
     // ② 回退：agent 事件桥（terminalId → workspaceId）
     const ctx = await orca.host.call('workspace.readContext').catch(() => null);
-    if (!ctx) return null;
-    const ids = new Set();
-    for (const t of ctx.terminals || []) {
-      const known = terminalWorkspace.get(t.id);
-      if (known) ids.add(known);
+    if (ctx) {
+      const ids = new Set();
+      for (const t of ctx.terminals || []) {
+        const known = terminalWorkspace.get(t.id);
+        if (known) ids.add(known);
+      }
+      if (ids.size === 1) {
+        const hit = matchWorkspaceId([...ids][0]);
+        if (hit) return hit;
+      }
+      // ③ 回退：branch（去 refs/heads/ 前缀）+ displayName 唯一命中
+      const byCtx = focusedFromHostContext(ctx, openedWorkspaces);
+      if (byCtx) return byCtx;
     }
-    if (ids.size === 1) {
-      const hit = matchWorkspaceId([...ids][0]);
-      if (hit) return hit;
+    // ④ 回退：仅打开了唯一一个工作区时直接采用，避免新工作区冷启动无焦点
+    if (openedWorkspaces.length === 1 && openedWorkspaces[0]?.path) {
+      return openedWorkspaces[0];
     }
-    // ③ 回退：branch+displayName 唯一命中
-    const candidates = openedWorkspaces.filter((w) =>
-      w.branch === ctx.branch && w.name === ctx.displayName);
-    if (candidates.length === 1) return candidates[0];
-    orca.log(`Workspace unresolved: ${ids.size} terminal ids, ${candidates.length} name matches`);
+    orca.log(`Workspace unresolved: opened=${openedWorkspaces.length}`);
     return null;
   }
 
@@ -244,11 +251,11 @@ function isInstalledPluginPath(target) {
     if (r.err) return null;
     const worktrees = orcaResult(parseOrcaJson(r.stdout))?.worktrees || [];
     const active = worktrees.find((w) => w?.isActive === true && w.path);
-    if (active) return { path: active.path, name: active.displayName || active.path.split('/').filter(Boolean).pop() || '' };
+    if (active) return { path: active.path, name: active.displayName || path.basename(active.path) || '' };
     const ranked = worktrees
       .filter((w) => w?.path && Number.isFinite(Number(w.lastActivityAt)))
       .sort((a, b) => Number(b.lastActivityAt) - Number(a.lastActivityAt));
-    return ranked[0] ? { path: ranked[0].path, name: ranked[0].displayName || ranked[0].path.split('/').filter(Boolean).pop() || '' } : null;
+    return ranked[0] ? { path: ranked[0].path, name: ranked[0].displayName || path.basename(ranked[0].path) || '' } : null;
   }
   async function resolveLiveFocusedWorkspace() {
     await refreshWorkspaces();
@@ -523,26 +530,86 @@ function isInstalledPluginPath(target) {
   const GALLERY_URL = `http://127.0.0.1:${GALLERY_PORT}/`;
   const GALLERY_SCRIPT = path.join(pluginRoot, 'src', 'gallery-server.mjs');
 
-  async function galleryAlive() {
+  async function checkGalleryStatus() {
     try {
       const r = await fetch(`${GALLERY_URL}api/list`, { signal: AbortSignal.timeout(1200) });
-      return r.ok;
-    } catch { return false; }
+      if (!r.ok) return { alive: false, match: false };
+      const data = await r.json().catch(() => null);
+      return { alive: true, match: Boolean(data && data.buildId === EXPECTED_BUILD_ID) };
+    } catch {
+      return { alive: false, match: false };
+    }
   }
 
-  // 服务探测只做一次快速健康检查（1200ms），失败则后台 spawn，不阻塞开 tab。
-  // 冷启动路径必须 < 1s：状态栏点击直接切/开 tab，库页自己会重试 API。
+  async function stopLegacyGalleryServer() {
+    try {
+      await fetch(`${GALLERY_URL}api/shutdown`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${GALLERY_PORT}` },
+        body: '{}',
+        signal: AbortSignal.timeout(800),
+      });
+    } catch {}
+    if (process.platform !== 'win32') {
+      try {
+        const pids = execFileSync('lsof', [`-tiTCP:${GALLERY_PORT}`, '-sTCP:LISTEN'], {
+          timeout: 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim().split(/\s+/).filter(Boolean);
+        for (const rawPid of pids) {
+          const pid = Number(rawPid);
+          if (!Number.isInteger(pid) || pid <= 1) continue;
+          const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+            timeout: 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+          });
+          if (cmd.includes('gallery-server.mjs')) {
+            try { process.kill(pid, 'SIGTERM'); } catch {}
+          }
+        }
+      } catch {}
+    }
+    for (let i = 0; i < 8; i++) {
+      const st = await checkGalleryStatus();
+      if (!st.alive) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
+  }
+
+  function spawnGalleryProcess() {
+    const childEnv = {
+      ...process.env,
+      ORCA_CLI_COMMAND: ORCA_BIN,
+      ORCA_USER_DATA: HOST_USER_DATA,
+      ORCA_PROFILE_DB: PROFILE_DB,
+      ORCA_STATE_FILE: STATE_FILE,
+    };
+    const child = execFile(process.execPath, [GALLERY_SCRIPT], {
+      detached: true,
+      stdio: 'ignore',
+      env: childEnv,
+    }, (err) => {
+      if (err) orca.log(`gallery spawn error: ${err.message}`);
+    });
+    child.unref();
+  }
+
+  // 服务探测快速健康检查（1200ms）：未启动则后台拉起；若 3480 被旧版插件常驻服务占据则自动热替换。
   let gallerySpawnInFlight = null;
   async function ensureGallery() {
-    if (await galleryAlive()) return true;
+    const status = await checkGalleryStatus();
+    if (status.alive && status.match) return true;
+    if (GALLERY_SCRIPT === '/dev/null') {
+      spawnGalleryProcess();
+      return false;
+    }
     if (!gallerySpawnInFlight) {
-      gallerySpawnInFlight = new Promise((resolve) => {
-        const child = execFile(process.execPath, [GALLERY_SCRIPT], { detached: true, stdio: 'ignore' }, (err) => {
-          if (err) orca.log(`gallery spawn error: ${err.message}`);
-          resolve();
-        });
-        child.unref();
-      }).finally(() => { gallerySpawnInFlight = null; });
+      gallerySpawnInFlight = (async () => {
+        if (status.alive && !status.match) {
+          orca.log(`Replacing stale gallery server on port ${GALLERY_PORT} with build ${EXPECTED_BUILD_ID}`);
+          await stopLegacyGalleryServer();
+        }
+        spawnGalleryProcess();
+      })().finally(() => { gallerySpawnInFlight = null; });
     }
     return false;
   }
@@ -585,7 +652,10 @@ function isInstalledPluginPath(target) {
     if (tabCacheTimer) return;
     tabCacheTimer = setInterval(() => {
       resolveLiveFocusedWorkspace()
-        .then((hit) => refreshTabCache(hit?.path || ''))
+        .then((hit) => {
+          if (hit?.path) writeState(hit.path, hit.name || hit.displayName || '');
+          return refreshTabCache(hit?.path || '');
+        })
         .catch(() => {});
     }, 30000);
     tabCacheTimer.unref?.();
@@ -808,8 +878,8 @@ function isInstalledPluginPath(target) {
   // （保留 openSkillEditor 供 /api/open 与 palette 命令返回编辑器 url）
 
   // 激活预热：worker 常驻（有 statusBarItems 的插件保持运行）——
-  // ① 服务提前拉起（点击时无冷启动）② tab 缓存循环启动（点击走 switch 快路径）
+  // ① 服务提前拉起或升级热替换（点击时无冷启动）② tab 缓存循环启动（点击走 switch 快路径）
   startTabCacheLoop();
-  galleryAlive().then((alive) => { if (!alive) ensureGallery().catch(() => {}); });
+  ensureGallery().catch(() => {});
   orca.log('Lakala-Design-Plugin worker activated successfully.');
 }

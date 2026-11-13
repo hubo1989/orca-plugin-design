@@ -1,5 +1,115 @@
 // Lakala-Design-Plugin · 技能元数据与共享规范
 // 对齐 baoyu-design v2.12.0 及 dsh-claude-artifacts 规范
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+const __metaFilename = fileURLToPath(import.meta.url);
+const __defaultPluginRoot = path.dirname(path.dirname(__metaFilename));
+
+export function detectHostAppFolder(pluginRoot = __defaultPluginRoot) {
+  const exec = String(process.execPath || '');
+  const root = String(pluginRoot || '');
+  if (/lkl-pmstudio/i.test(exec) || /lkl-pmstudio/i.test(root)) return 'LKL-PMStudio';
+  return 'orca';
+}
+
+export function resolveHostUserData(pluginRoot = __defaultPluginRoot) {
+  const envSet = process.env.ORCA_USER_DATA?.trim();
+  if (envSet) return path.resolve(envSet);
+
+  // 若插件位于 <userData>/plugins/<pluginKey>/... 下，直接反推真实宿主 userData
+  const resolvedRoot = path.resolve(String(pluginRoot || __defaultPluginRoot));
+  const marker = `${path.sep}plugins${path.sep}`;
+  const idx = resolvedRoot.lastIndexOf(marker);
+  if (idx > 0) {
+    return resolvedRoot.slice(0, idx);
+  }
+
+  const home = process.env.HOME || os.homedir();
+  const appFolder = detectHostAppFolder(resolvedRoot);
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', appFolder);
+  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), appFolder);
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), appFolder);
+}
+
+export function resolveProfileDb(pluginRoot = __defaultPluginRoot) {
+  const envSet = process.env.ORCA_PROFILE_DB?.trim();
+  if (envSet) return envSet;
+  const userData = resolveHostUserData(pluginRoot);
+  const defaultDb = path.join(userData, 'profiles', 'local-default', 'profile-state.db');
+  if (fs.existsSync(defaultDb)) return defaultDb;
+  try {
+    const profilesDir = path.join(userData, 'profiles');
+    for (const entry of fs.readdirSync(profilesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(profilesDir, entry.name, 'profile-state.db');
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch {}
+  return defaultDb;
+}
+
+export function resolveHostCli(pluginRoot = __defaultPluginRoot) {
+  const envSet = process.env.ORCA_CLI_COMMAND?.trim();
+  if (envSet) return envSet;
+
+  const exec = String(process.execPath || '');
+  const isPms = detectHostAppFolder(pluginRoot) === 'LKL-PMStudio';
+  const binNames = process.platform === 'win32'
+    ? (isPms ? ['pms.cmd', 'pms.exe', 'orca.cmd', 'orca.exe'] : ['orca.cmd', 'orca.exe', 'pms.cmd', 'pms.exe'])
+    : (isPms ? ['pms', 'orca'] : ['orca', 'pms']);
+
+  const candidates = [];
+  if (process.platform === 'darwin') {
+    const appMatch = exec.match(/^(.+?\.app)\/Contents\//);
+    if (appMatch) {
+      for (const name of binNames) {
+        candidates.push(path.join(appMatch[1], 'Contents', 'Resources', 'bin', name));
+      }
+    }
+    if (isPms) {
+      candidates.push(
+        '/Applications/LKL-PMStudio.app/Contents/Resources/bin/pms',
+        '/Applications/LKL-PMStudio.app/Contents/Resources/bin/orca',
+      );
+    }
+    candidates.push(
+      '/Applications/Orca.app/Contents/Resources/bin/orca',
+      '/Applications/LKL-PMStudio.app/Contents/Resources/bin/pms',
+    );
+  } else if (process.platform === 'win32' && exec) {
+    const exeDir = path.dirname(exec);
+    for (const base of [exeDir, path.dirname(exeDir)]) {
+      for (const name of binNames) {
+        candidates.push(path.join(base, 'resources', 'bin', name));
+        candidates.push(path.join(base, name));
+      }
+    }
+  }
+
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {}
+  }
+  return isPms ? 'pms' : 'orca';
+}
+
+export function computeGalleryBuildId(pluginRoot = __defaultPluginRoot) {
+  const hash = crypto.createHash('sha256');
+  hash.update(String(pluginRoot));
+  for (const rel of ['src/gallery-server.mjs', 'src/gallery-ui.mjs', 'src/builtin-library.mjs', 'src/skills-meta.mjs']) {
+    try {
+      hash.update(fs.readFileSync(path.join(pluginRoot, rel)));
+    } catch {}
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
+export const GALLERY_BUILD_ID = computeGalleryBuildId(__defaultPluginRoot);
 
 export const SKILLS = [
   {

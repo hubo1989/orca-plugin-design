@@ -12,6 +12,7 @@ fs.mkdirSync(designHome, { recursive: true });
 
 process.env.ORCA_DESIGN_HOME = designHome;
 process.env.ORCA_STATE_FILE = path.join(tmpDir, 'prototype-studio-state.json');
+process.env.ORCA_PROFILE_DB = path.join(tmpDir, 'nonexistent-profile.db');
 const stateFile = process.env.ORCA_STATE_FILE;
 // worker 的 writeState 现在带 updatedAt；readState 只认 15s 内的快照，否则回退 profile DB。
 fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot: wsDir, workspaceName: 'test-workspace', updatedAt: Date.now() }));
@@ -45,6 +46,9 @@ test('gallery HTML renders studio layout, Lakala design system stage, and valid 
   assert.ok(html.includes('--dsw-alias-bg-base'), 'Contains --dsw-alias-bg-base CSS variable');
   assert.ok(html.includes('id="sec-ds"'), 'Contains dedicated design system stage');
   assert.ok(html.includes('#00b9f1'), 'Includes Lakala brand cyan token');
+  assert.ok(html.indexOf('id="sec-examples"') < html.indexOf('id="sec-works"'), 'Examples appear ahead of empty works section by default');
+  assert.ok(!/\.bda-example-stage iframe\s*\{[^}]*opacity:\s*0/.test(html), 'Example stage iframes are never hidden behind opacity:0');
+  assert.ok(!/content\.appendChild\(sec\)/.test(html), 'Section reordering never moves DOM nodes with appendChild');
   assert.ok(html.includes('claude-slides'), 'Supports claude-slides');
   assert.ok(html.includes('claude-design'), 'Supports claude-design');
   assert.ok(html.includes('claude-design-system'), 'Supports claude-design-system');
@@ -163,6 +167,16 @@ test('missing artifact governance: detect missing, auto-heal when restored, and 
   const afterForget = listArtifactsViews();
   assert.equal(afterForget.artifacts.some((a) => a.missing), false);
   assert.ok(afterForget.artifacts.length >= 4, 'Valid projects remain intact');
+  assert.ok(typeof afterForget.buildId === 'string' && afterForget.buildId.length >= 8, 'Includes gallery buildId');
+
+  // Stale state file (>15s old) still preserves existing workspace directory when profile DB has no newer focus
+  fs.writeFileSync(stateFile, JSON.stringify({
+    workspaceRoot: wsDir,
+    workspaceName: 'stale-but-valid-ws',
+    updatedAt: Date.now() - 120_000,
+  }));
+  const fallbackList = listArtifactsViews();
+  assert.equal(fallbackList.workspaceRoot, wsDir);
 });
 
 test.after(() => {

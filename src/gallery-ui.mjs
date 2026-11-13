@@ -59,6 +59,10 @@ export function createGalleryStrings(skills, recipes, examples) {
       workflows: '跨技能 AI 工作流',
       workflowsSubtitle: '一键在当前工作区发起多步串联任务，让设计系统与下游产出保持一致',
       allWorks: '全部作品',
+      scopeWorkspace: '当前工作区 ({count})',
+      scopeAll: '全部历史 ({count})',
+      emptyCompactText: '当前工作区尚无作品，可直接使用上方精选示例或从下方工具快速新建。',
+      emptyShowOtherWs: '查看其他工作区作品 ({count})',
       currentWsBadge: '当前工作区',
       otherWsBadge: '历史工作区',
       back: '← 返回工作台',
@@ -222,6 +226,10 @@ export function createGalleryStrings(skills, recipes, examples) {
       workflows: 'Cross-Skill AI Workflows',
       workflowsSubtitle: 'Launch multi-step agent pipelines in your focused workspace while keeping visual tokens aligned',
       allWorks: 'Projects',
+      scopeWorkspace: 'Workspace ({count})',
+      scopeAll: 'All History ({count})',
+      emptyCompactText: 'No projects in this workspace yet—instantiate a curated example above or create from a tool below.',
+      emptyShowOtherWs: 'View other workspaces ({count})',
       currentWsBadge: 'Current workspace',
       otherWsBadge: 'Other workspace',
       back: '← Back to Studio',
@@ -601,10 +609,10 @@ button, input { font: inherit; }
 .bda-content {
   max-width: 1240px;
   margin: 0 auto;
-  padding: 24px clamp(20px, 3.4vw, 44px) 72px;
+  padding: 18px clamp(18px, 3vw, 38px) 64px;
   display: flex;
   flex-direction: column;
-  gap: 34px;
+  gap: 24px;
 }
 
 /* 顶栏 */
@@ -721,13 +729,13 @@ button, input { font: inherit; }
 }
 .ds-hero {
   position: relative;
-  padding: 30px 30px 28px;
+  padding: 20px 24px 18px;
   background: linear-gradient(150deg, #0b3875 0%, #0e2c54 58%, #10243d 100%);
   color: #f4f9fc;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 22px;
+  gap: 14px;
   overflow: hidden;
 }
 .ds-hero-orbit {
@@ -781,10 +789,10 @@ button, input { font: inherit; }
   display: flex;
   align-items: baseline;
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 .ds-lakala-mark {
-  font-size: 24px;
+  font-size: 21px;
   font-weight: 800;
   letter-spacing: -1px;
   color: #fff;
@@ -794,27 +802,27 @@ button, input { font: inherit; }
   color: #00b9f1;
 }
 .ds-hero h2 {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 700;
-  letter-spacing: -0.6px;
+  letter-spacing: -0.5px;
   line-height: 1.24;
-  margin-top: 6px;
+  margin-top: 4px;
   color: #ffffff;
 }
 .ds-hero-desc {
-  margin-top: 10px;
-  font-size: 13px;
-  line-height: 1.72;
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.58;
   color: rgba(230, 243, 250, 0.84);
 }
 .ds-stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 7px;
 }
 .ds-stat {
-  padding: 9px 11px;
-  border-radius: 10px;
+  padding: 7px 10px;
+  border-radius: 9px;
   background: rgba(255, 255, 255, 0.065);
   border: 1px solid rgba(255, 255, 255, 0.1);
   font-size: 12px;
@@ -885,7 +893,7 @@ button, input { font: inherit; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 13px 18px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--dsw-alias-border-l2);
   background: var(--studio-surface-2);
   flex-wrap: wrap;
@@ -940,10 +948,10 @@ button, input { font: inherit; }
 }
 .ds-lab-body {
   flex: 1;
-  padding: 16px 18px 18px;
+  padding: 12px 16px 14px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 .ds-lab-body[data-token-theme="dark"] {
   background: #0f1d2a;
@@ -960,13 +968,13 @@ button, input { font: inherit; }
 .ds-swatches-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 9px;
+  gap: 7px;
 }
 .ds-swatch-card {
   display: flex;
   flex-direction: column;
-  padding: 7px;
-  border-radius: 11px;
+  padding: 6px;
+  border-radius: 10px;
   border: 1px solid var(--dsw-alias-border-l2);
   background: rgba(128, 155, 175, 0.05);
   text-align: left;
@@ -980,10 +988,10 @@ button, input { font: inherit; }
 }
 .ds-swatch-chip {
   width: 100%;
-  height: 34px;
-  border-radius: 7px;
+  height: 24px;
+  border-radius: 6px;
   border: 1px solid rgba(16, 43, 70, 0.12);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .ds-swatch-name {
   font-size: 11px;
@@ -1244,7 +1252,39 @@ button, input { font: inherit; }
   overflow: hidden;
 }
 
-/* 类型胶囊栏 */
+/* 类型胶囊栏与工作区范围切换 */
+.works-head-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.scope-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--studio-surface-2);
+}
+.scope-btn {
+  height: 25px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color .14s, color .14s;
+}
+.scope-btn[data-on="true"] {
+  background: var(--studio-surface);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--studio-shadow-sm);
+}
 .type-pills {
   display: flex;
   flex-wrap: wrap;
@@ -1634,11 +1674,9 @@ button, input { font: inherit; }
   border: 0;
   transform-origin: 0 0;
   pointer-events: none;
-  opacity: 0;
-  transition: opacity .28s;
+  opacity: 1;
   background: #fff;
 }
-.bda-example-stage iframe.on { opacity: 1; }
 .bda-example-label {
   position: absolute;
   left: 10px;
@@ -1919,6 +1957,31 @@ button, input { font: inherit; }
 }
 .bda-empty h2 { font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .bda-empty p { max-width: 440px; font-size: 13px; line-height: 1.65; color: var(--dsw-alias-label-secondary); }
+.bda-empty-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 13px 16px;
+  border-radius: 14px;
+  border: 1px dashed var(--dsw-alias-border-l1);
+  background: color-mix(in srgb, var(--studio-surface) 72%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+}
+.bda-empty-compact-copy {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.bda-empty-compact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 
 #editorView {
   display: flex;
@@ -1965,14 +2028,33 @@ button, input { font: inherit; }
   .bda-page { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .bda-rail {
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    padding: 10px 16px;
+    gap: 6px 10px;
+    padding: 8px 12px;
     border-right: 0;
     border-bottom: 1px solid var(--dsw-alias-border-l2);
+  }
+  .rail-brand { padding: 0; gap: 8px; }
+  .rail-brand-tag { display: none; }
+  .rail-ws-card, .rail-skills-box { display: none; }
+  .rail-nav {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    flex: 1 1 auto;
+    min-width: 0;
     overflow-x: auto;
   }
-  .rail-ws-card, .rail-group { display: none; }
-  .rail-footer { margin-top: 0; margin-left: auto; padding-top: 0; border-top: 0; }
+  .rail-nav .rail-link {
+    width: auto;
+    padding: 5px 8px;
+    gap: 5px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .rail-footer { margin-top: 0; margin-left: auto; padding-top: 0; border-top: 0; flex: none; }
   .ds-swatches-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ds-comp-stage, .ds-scales-row { grid-template-columns: 1fr; }
 }
@@ -2134,6 +2216,7 @@ const state = {
   artifacts: [],
   workspaceName: '',
   workspaceRoot: '',
+  scope: 'workspace',
   search: '',
   viewMode: readPreference('ps_view_mode') || 'grid',
   filters: {
@@ -2204,6 +2287,17 @@ window.addEventListener('click', (e) => {
 function validArtifacts() {
   return state.artifacts.filter((a) => !a.missing);
 }
+function workspaceArtifacts() {
+  const all = validArtifacts();
+  return state.workspaceRoot ? all.filter((a) => a.inCurrentWorkspace) : all;
+}
+function scopedArtifacts() {
+  const all = validArtifacts();
+  if (state.workspaceRoot && state.scope === 'workspace') {
+    return all.filter((a) => a.inCurrentWorkspace);
+  }
+  return all;
+}
 function missingArtifacts() {
   return state.artifacts.filter((a) => a.missing);
 }
@@ -2217,6 +2311,7 @@ function activeWorkspaceDesignSystem() {
 
 function matchesFilter(item) {
   if (item.missing) return false;
+  if (state.workspaceRoot && state.scope === 'workspace' && !item.inCurrentWorkspace) return false;
   const q = state.search.trim().toLowerCase();
   if (q) {
     const hay = (item.title + ' ' + (item.tail || '') + ' ' + item.skill).toLowerCase();
@@ -2275,7 +2370,7 @@ function renderSchemeButton() {
 }
 
 function renderRailSkills() {
-  const valid = validArtifacts();
+  const valid = scopedArtifacts();
   const counts = new Map();
   valid.forEach((a) => counts.set(a.skill, (counts.get(a.skill) || 0) + 1));
   const worksBadge = document.getElementById('railWorksCount');
@@ -2609,10 +2704,53 @@ function renderMissingTray() {
   });
 }
 
+function syncSectionOrder() {
+  const wsItems = workspaceArtifacts();
+  const hasActiveWorks = wsItems.length > 0 || (state.scope === 'all' && validArtifacts().length > 0);
+  const desired = hasActiveWorks
+    ? ['sec-ds', 'sec-works', 'sec-examples', 'sec-new', 'sec-workflows']
+    : ['sec-ds', 'sec-examples', 'sec-works', 'sec-new', 'sec-workflows'];
+
+  // 使用 CSS order 重排而非 DOM appendChild，避免浏览器销毁并重置示例卡片中的 srcdoc iframe
+  desired.forEach((id, idx) => {
+    const order = String(idx + 1);
+    const sec = document.getElementById(id);
+    if (sec && sec.style.order !== order) sec.style.order = order;
+    const btn = document.querySelector('#railNav [data-nav="' + id + '"]');
+    if (btn && btn.style.order !== order) btn.style.order = order;
+  });
+}
+
+function renderScopeSwitch() {
+  const wrap = document.getElementById('scopeSwitch');
+  if (!wrap) return;
+  const allCount = validArtifacts().length;
+  const wsCount = workspaceArtifacts().length;
+  if (!state.workspaceRoot || allCount === 0) {
+    wrap.className = 'scope-switch hidden';
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.className = 'scope-switch';
+  wrap.innerHTML =
+    '<button type="button" class="scope-btn" data-scope="workspace" data-on="' + (state.scope === 'workspace') + '">' +
+    esc(t('scopeWorkspace', { count: wsCount })) + '</button>' +
+    '<button type="button" class="scope-btn" data-scope="all" data-on="' + (state.scope === 'all') + '">' +
+    esc(t('scopeAll', { count: allCount })) + '</button>';
+  wrap.onclick = (e) => {
+    const btn = e.target.closest('[data-scope]');
+    if (!btn) return;
+    state.scope = btn.getAttribute('data-scope');
+    renderItems();
+  };
+}
+
 function renderItems() {
+  syncSectionOrder();
   renderRailSkills();
   renderDesignSystemStage();
   renderMissingTray();
+  renderScopeSwitch();
 
   const container = document.getElementById('container');
   const items = getSortedList();
@@ -2624,21 +2762,39 @@ function renderItems() {
 
   if (!items.length) {
     const filtered = Boolean(state.search || isFilterActive());
-    container.innerHTML = '<div class="bda-empty">' +
-      SVG_ICONS.info +
-      '<h2>' + esc(filtered ? t('noMatches') : t('noWorks')) + '</h2>' +
-      '<p>' + esc(filtered ? t('clearHint') : t('emptyHint')) + '</p>' +
-      (filtered
-        ? ('<button type="button" class="bda-btn" id="clearFilterBtn" style="margin-top:10px">' + esc(t('clearFilters')) + '</button>')
-        : ('<button type="button" class="bda-btn" data-primary="true" id="emptyInitDsBtn" style="margin-top:10px">' + esc(t('dsInitBtn')) + '</button>')) +
-      '</div>';
-    const clearBtn = document.getElementById('clearFilterBtn');
-    if (clearBtn) {
-      clearBtn.onclick = () => {
-        state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false };
-        state.search = '';
-        document.getElementById('q').value = '';
-        document.getElementById('clearSearch').className = 'hidden';
+    if (filtered) {
+      container.innerHTML = '<div class="bda-empty">' +
+        SVG_ICONS.info +
+        '<h2>' + esc(t('noMatches')) + '</h2>' +
+        '<p>' + esc(t('clearHint')) + '</p>' +
+        '<button type="button" class="bda-btn" id="clearFilterBtn" style="margin-top:10px">' + esc(t('clearFilters')) + '</button>' +
+        '</div>';
+      const clearBtn = document.getElementById('clearFilterBtn');
+      if (clearBtn) {
+        clearBtn.onclick = () => {
+          state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false };
+          state.search = '';
+          document.getElementById('q').value = '';
+          document.getElementById('clearSearch').className = 'hidden';
+          renderItems();
+        };
+      }
+      return;
+    }
+
+    const otherCount = Math.max(0, validArtifacts().length - workspaceArtifacts().length);
+    container.innerHTML = '<div class="bda-empty-compact">' +
+      '<div class="bda-empty-compact-copy">' + SVG_ICONS.info + '<span>' + esc(t('emptyCompactText')) + '</span></div>' +
+      '<div class="bda-empty-compact-actions">' +
+      (otherCount > 0 && state.scope === 'workspace'
+        ? ('<button type="button" class="bda-btn" id="emptyShowAllBtn">' + esc(t('emptyShowOtherWs', { count: otherCount })) + '</button>')
+        : '') +
+      '<button type="button" class="bda-btn" data-primary="true" id="emptyInitDsBtn">' + esc(t('dsInitBtn')) + '</button>' +
+      '</div></div>';
+    const showAllBtn = document.getElementById('emptyShowAllBtn');
+    if (showAllBtn) {
+      showAllBtn.onclick = () => {
+        state.scope = 'all';
         renderItems();
       };
     }
@@ -2697,39 +2853,62 @@ function renderItems() {
   activateLivePreviews(container);
 }
 
+function rescaleStageFrames() {
+  document.querySelectorAll('[data-stage-example]').forEach((stage) => {
+    const f = stage.querySelector('iframe');
+    if (!f) return;
+    const w = stage.clientWidth || 320;
+    f.style.transform = 'scale(' + (w / 1200) + ')';
+  });
+  document.querySelectorAll('.bda-live.on').forEach((f) => {
+    const w = (f.parentElement && f.parentElement.clientWidth) || 320;
+    f.style.transform = 'scale(' + (w / 1280) + ')';
+  });
+}
+
+const stageResizeObserver = typeof ResizeObserver !== 'undefined'
+  ? new ResizeObserver(() => rescaleStageFrames())
+  : null;
+window.addEventListener('resize', rescaleStageFrames, { passive: true });
+
 function activateLivePreviews(container) {
+  const scrollRoot = document.getElementById('mainScroll');
+  const mount = (f) => {
+    if (f.dataset.mounted === '1') return;
+    f.dataset.mounted = '1';
+    const w = (f.parentElement && f.parentElement.clientWidth) || 320;
+    f.style.transform = 'scale(' + (w / 1280) + ')';
+    f.addEventListener('load', () => f.classList.add('on'), { once: true });
+    f.src = f.getAttribute('data-src');
+    setTimeout(() => f.classList.add('on'), 600);
+    if (stageResizeObserver && f.parentElement) stageResizeObserver.observe(f.parentElement);
+  };
+  if (typeof IntersectionObserver === 'undefined') {
+    container.querySelectorAll('.bda-live[data-src]').forEach(mount);
+    return;
+  }
   const io = new IntersectionObserver((entries) => {
     for (const e of entries) {
       if (!e.isIntersecting) continue;
       io.unobserve(e.target);
-      const f = e.target;
-      const w = (f.parentElement && f.parentElement.clientWidth) || 320;
-      f.style.transform = 'scale(' + (w / 1280) + ')';
-      f.src = f.getAttribute('data-src');
-      f.addEventListener('load', () => f.classList.add('on'), { once: true });
+      mount(e.target);
     }
-  }, { rootMargin: '180px' });
+  }, { root: scrollRoot, rootMargin: '260px' });
   container.querySelectorAll('.bda-live[data-src]').forEach((f) => io.observe(f));
 }
 
 function activateExampleStages(container) {
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting) continue;
-      io.unobserve(e.target);
-      const stage = e.target;
-      const exId = stage.getAttribute('data-stage-example');
-      const ex = OFFICIAL_EXAMPLES.find((x) => x.id === exId);
-      if (!ex || !ex.html) continue;
-      const f = stage.querySelector('iframe');
-      if (!f) continue;
-      const w = stage.clientWidth || 320;
-      f.style.transform = 'scale(' + (w / 1200) + ')';
-      f.srcdoc = ex.html;
-      f.addEventListener('load', () => f.classList.add('on'), { once: true });
-    }
-  }, { rootMargin: '220px' });
-  container.querySelectorAll('[data-stage-example]').forEach((el) => io.observe(el));
+  container.querySelectorAll('[data-stage-example]').forEach((stage) => {
+    const exId = stage.getAttribute('data-stage-example');
+    const ex = OFFICIAL_EXAMPLES.find((x) => x.id === exId);
+    if (!ex || !ex.html) return;
+    const f = stage.querySelector('iframe');
+    if (!f) return;
+    const w = stage.clientWidth || 320;
+    f.style.transform = 'scale(' + (w / 1200) + ')';
+    f.srcdoc = ex.html;
+    if (stageResizeObserver) stageResizeObserver.observe(stage);
+  });
 }
 
 async function openItem(item) {
@@ -3292,11 +3471,11 @@ document.getElementById('reloadBtn').onclick = async () => {
 
 const mainScroll = document.getElementById('mainScroll');
 mainScroll.addEventListener('scroll', () => {
-  const ids = ['sec-ds', 'sec-new', 'sec-works', 'sec-examples', 'sec-workflows'];
-  let active = ids[0];
-  for (const id of ids) {
-    const el = document.getElementById(id);
-    if (el && el.getBoundingClientRect().top <= 160) active = id;
+  const secs = [...document.querySelectorAll('.bda-content > section[id]')]
+    .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+  let active = secs[0] ? secs[0].id : 'sec-ds';
+  for (const el of secs) {
+    if (el.getBoundingClientRect().top <= 160) active = el.id;
   }
   document.querySelectorAll('[data-nav]').forEach((b) => {
     b.setAttribute('data-active', b.getAttribute('data-nav') === active ? 'true' : 'false');
@@ -3382,21 +3561,21 @@ try {
       </div>
     </div>
 
-    <nav class="rail-group" aria-label="Sections">
+    <nav class="rail-group rail-nav" id="railNav" aria-label="Sections">
       <button type="button" class="rail-link" data-nav="sec-ds" data-active="true">
         <span data-i18n="navDesignSystem">${text('navDesignSystem')}</span>
         <span class="rail-badge">Lakala</span>
       </button>
-      <button type="button" class="rail-link" data-nav="sec-new" data-active="false">
-        <span data-i18n="new">${text('new')}</span>
+      <button type="button" class="rail-link" data-nav="sec-examples" data-active="false">
+        <span data-i18n="navExamples">${text('navExamples')}</span>
+        <span class="rail-count">${examples.length}</span>
       </button>
       <button type="button" class="rail-link" data-nav="sec-works" data-active="false">
         <span data-i18n="navWorks">${text('navWorks')}</span>
         <span class="rail-count" id="railWorksCount">0</span>
       </button>
-      <button type="button" class="rail-link" data-nav="sec-examples" data-active="false">
-        <span data-i18n="navExamples">${text('navExamples')}</span>
-        <span class="rail-count">${examples.length}</span>
+      <button type="button" class="rail-link" data-nav="sec-new" data-active="false">
+        <span data-i18n="new">${text('new')}</span>
       </button>
       <button type="button" class="rail-link" data-nav="sec-workflows" data-active="false">
         <span data-i18n="navWorkflows">${text('navWorkflows')}</span>
@@ -3404,7 +3583,7 @@ try {
       </button>
     </nav>
 
-    <div class="rail-group">
+    <div class="rail-group rail-skills-box">
       <div class="rail-group-label" data-i18n="railSkillsLabel">${text('railSkillsLabel')}</div>
       <div id="railSkillLinks" class="rail-group"></div>
     </div>
@@ -3487,29 +3666,32 @@ try {
         </div>
       </section>
 
-      <section class="studio-section" id="sec-new">
-        <div class="section-head">
-          <h2 class="bda-section-title" data-i18n="new">${text('new')}</h2>
-          <span class="section-sub" data-i18n="newSubtitle">${text('newSubtitle')}</span>
-        </div>
-        <ul class="bda-tiles" id="tiles"></ul>
-      </section>
-
-      <section class="studio-section" id="sec-works">
-        <div class="section-head">
-          <h2 class="bda-section-title" id="listHeading" data-i18n="allWorks">${text('allWorks')}</h2>
-          <div class="type-pills" id="typePills"></div>
-        </div>
-        <div id="container"></div>
-        <div id="missingTray" class="missing-tray hidden"></div>
-      </section>
-
       <section class="studio-section" id="sec-examples">
         <div class="section-head">
           <h2 class="bda-section-title" data-i18n="examples">${text('examples')}</h2>
           <span class="section-sub" data-i18n="examplesSubtitle">${text('examplesSubtitle')}</span>
         </div>
         <ul id="examples"></ul>
+      </section>
+
+      <section class="studio-section" id="sec-works">
+        <div class="section-head">
+          <div class="works-head-left">
+            <h2 class="bda-section-title" id="listHeading" data-i18n="allWorks">${text('allWorks')}</h2>
+            <div id="scopeSwitch" class="scope-switch hidden"></div>
+          </div>
+          <div class="type-pills" id="typePills"></div>
+        </div>
+        <div id="container"></div>
+        <div id="missingTray" class="missing-tray hidden"></div>
+      </section>
+
+      <section class="studio-section" id="sec-new">
+        <div class="section-head">
+          <h2 class="bda-section-title" data-i18n="new">${text('new')}</h2>
+          <span class="section-sub" data-i18n="newSubtitle">${text('newSubtitle')}</span>
+        </div>
+        <ul class="bda-tiles" id="tiles"></ul>
       </section>
 
       <section class="studio-section" id="sec-workflows">

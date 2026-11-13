@@ -24,13 +24,17 @@ import {
   BUILTIN_BY_ID,
   EXAMPLE_TEMPLATES,
   EXAMPLE_INDEX,
+  resolveHostCli,
+  resolveHostUserData,
+  resolveProfileDb,
+  GALLERY_BUILD_ID,
 } from './skills-meta.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
-const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
+const ORCA_BIN = resolveHostCli(pluginRoot);
 const PORT = Number(process.env.PORT) || 3480;
 
 const OFFICIAL_EXAMPLES = BUILTIN_EXAMPLES
@@ -75,10 +79,7 @@ function hasCustomDesignHome() {
 function dshHome() {
   const set = process.env.ORCA_DESIGN_HOME?.trim() || process.env.DSH_HOME?.trim();
   if (set) return set;
-  const home = process.env.HOME || os.homedir();
-  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'orca', 'baoyu-design');
-  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca', 'baoyu-design');
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'orca', 'baoyu-design');
+  return path.join(resolveHostUserData(pluginRoot), 'baoyu-design');
 }
 
 function artifactsDir() { return path.join(dshHome(), 'artifacts'); }
@@ -403,10 +404,7 @@ async function renameArtifact(skill, root, title) {
 }
 
 function installRoot() {
-  const home = process.env.HOME || os.homedir();
-  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'orca', 'plugins');
-  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca', 'plugins');
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'orca', 'plugins');
+  return path.join(resolveHostUserData(pluginRoot), 'plugins');
 }
 function isInstalledPluginPath(target) {
   const root = path.resolve(installRoot());
@@ -414,7 +412,7 @@ function isInstalledPluginPath(target) {
   return p === root || p.startsWith(root + path.sep);
 }
 
-const PROFILE_DB = process.env.ORCA_PROFILE_DB || path.join(process.env.HOME || os.homedir(), 'Library', 'Application Support', 'orca', 'profiles', 'local-default', 'profile-state.db');
+const PROFILE_DB = resolveProfileDb(pluginRoot);
 
 function validWsRoot(p) {
   if (typeof p !== 'string' || !path.isAbsolute(p)) return false;
@@ -441,10 +439,18 @@ function readState() {
   const STATE_TTL_MS = 15000;
   let explicit = {};
   try { explicit = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
-  // 点击时写入的焦点快照只在短时间内有效：超时后重新读 profile DB，避免库页永远钉在打开时的工作区。
+  const explicitValid = validWsRoot(explicit.workspaceRoot);
+  const explicitState = explicitValid
+    ? {
+        workspaceRoot: explicit.workspaceRoot,
+        workspaceName: explicit.workspaceName || path.basename(explicit.workspaceRoot) || '',
+      }
+    : null;
+  // 点击时写入的焦点快照在短时间内优先消费；超时后优先读宿主 profile DB，
+  // 若宿主无 sqlite3 CLI（如 Windows）或 profile 尚未落盘，则回退保留已知合法快照。
   const fresh = Number.isFinite(Number(explicit.updatedAt)) &&
     Date.now() - Number(explicit.updatedAt) < STATE_TTL_MS;
-  if (fresh && validWsRoot(explicit.workspaceRoot)) return explicit;
+  if (fresh && explicitState) return explicitState;
   try {
     const out = execFileSync('sqlite3', [PROFILE_DB,
       "SELECT payload FROM profile_state_documents WHERE domain='workspaceSession'"],
@@ -453,9 +459,10 @@ function readState() {
     const id = ws.activeWorktreeId || '';
     const p = id.includes('::') ? id.split('::').pop() : '';
     if (validWsRoot(p)) {
-      return { workspaceRoot: p, workspaceName: p.split('/').filter(Boolean).pop() || '' };
+      return { workspaceRoot: p, workspaceName: path.basename(p) || '' };
     }
   } catch {}
+  if (explicitState) return explicitState;
   return { workspaceRoot: '', workspaceName: '' };
 }
 
@@ -657,7 +664,7 @@ function listArtifactsViews() {
       deletable: isMissing ? false : isDeletable(rec.skill, root),
       meta: isMissing ? '' : projectMeta(rec.skill, root),
       note: typeof rec.note === 'string' ? rec.note : '',
-      tail: root.split('/').slice(-2).join('/'),
+      tail: root.split(/[\\/]/).filter(Boolean).slice(-2).join('/'),
       openable: !isMissing,
       missing: isMissing,
       missingReason: isMissing ? (rec._missingReason || 'dir_missing') : '',
@@ -675,6 +682,8 @@ function listArtifactsViews() {
 
   return {
     ok: true,
+    buildId: GALLERY_BUILD_ID,
+    pluginRoot,
     artifacts: views,
     workspaceName: state.workspaceName || '',
     workspaceRoot,
@@ -828,7 +837,7 @@ const server = http.createServer((req, res) => {
   const allowedGet = ['/', '/api/list', '/api/preview', '/api/thumb'];
   // 所有状态变更都走 POST + guardPost；/api/open 会拉起编辑器，/api/open-url 会跳转，
   // 二者留在 GET 白名单会让跨站页面绕过收口（simple request 不触发 CORS 预检）。
-  const allowedPost = ['/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/register', '/api/forget'];
+  const allowedPost = ['/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/shutdown', '/api/start', '/api/register', '/api/forget'];
   if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
     res.statusCode = 404; return res.end('{}');
   }
@@ -941,6 +950,12 @@ const server = http.createServer((req, res) => {
     }
     if (url.pathname === '/api/stop') return finish(await stopSkillEditor(skill, root));
     if (url.pathname === '/api/restart-editor') return finish(await restartEditor(skill, root));
+    if (url.pathname === '/api/shutdown') {
+      finish({ ok: true, shuttingDown: true });
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 250).unref?.();
+      return;
+    }
     if (url.pathname === '/api/restart') {
       finish({ ok: true, restarting: true });
       server.close(() => {
@@ -958,6 +973,7 @@ const server = http.createServer((req, res) => {
 export {
   listArtifactsViews,
   openSkillEditor,
+  stopSkillEditor,
   trashArtifact,
   restoreArtifact,
   renameArtifact,
@@ -972,7 +988,16 @@ export {
   server,
 };
 
-if (process.argv[1] === __filename) {
+function isDirectEntry() {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(__filename);
+  } catch {
+    return path.resolve(process.argv[1]) === path.resolve(__filename);
+  }
+}
+
+if (isDirectEntry()) {
   server.on('error', (e) => console.error('gallery server error:', e.message));
   server.listen(PORT, '127.0.0.1', () => console.log(`gallery listening on ${PORT}`));
 }
