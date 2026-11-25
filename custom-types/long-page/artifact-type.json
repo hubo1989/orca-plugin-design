@@ -1,0 +1,55 @@
+{
+  "slug": "long-page",
+  "uid": "7d42b19a-3e8f-4c7a-8b15-9f2a6d40c318",
+  "name": "长页排版",
+  "title": "长页排版 · Long Page",
+  "description": "面向中文/中英混排长文、调研纪要与专栏文章的精排单页网页编辑器，支持忠实精排与提炼解读双模式、CJK T1–T10 排版规范、375px 移动端/桌面端预览与单文件离线 HTML/PDF 导出。",
+  "summary": "CJK T1–T10 精排长页、明暗双主题与单文件 HTML / PDF 导出",
+  "artifactTitle": "未命名长页文章",
+  "category": "Documents",
+  "icon": {
+    "file": "icon.svg"
+  },
+  "version": "0.1.0",
+  "i18n": {
+    "en": {
+      "name": "Long Page",
+      "title": "Long Page",
+      "summary": "CJK T1-T10 long-form editorial page with light/dark themes and offline HTML/PDF export",
+      "description": "Long-form Chinese/bilingual editorial layout editor with faithful and digest modes, CJK T1-T10 typography, 375px mobile & desktop viewport preview, and standalone HTML/PDF export.",
+      "artifactTitle": "Untitled long page"
+    }
+  },
+  "skill": "SKILL.md",
+  "intents": [
+    "long-page",
+    "article",
+    "long-form",
+    "newsletter"
+  ],
+  "when": "When the person wants an article, research memo, or note laid out into a responsive Chinese-English long-form single web page with offline HTML, PDF, or long PNG export.",
+  "templates": [
+    {
+      "id": "faithful-layout",
+      "name": "忠实精排模式（原文一字不改）",
+      "prompt": "帮我用长页排版（long-page）的「忠实精排模式（mode: faithful）」对下面文章做精排，严格保留原文措辞与段落，只优化结构层级、Callout 与表格/代码容器，写入 content.json。原文如下："
+    },
+    {
+      "id": "digest-reading",
+      "name": "提炼解读模式（摘要导读 + 核心结论）",
+      "prompt": "帮我用长页排版（long-page）的「提炼解读模式（mode: digest）」把下面长材料整理成带核心结论卡与章节锚点的阅读长页，写入 content.json。材料如下："
+    }
+  ],
+  "engines": {
+    "openArtifact": ">=1"
+  },
+  "openArtifact": {
+    "store": "files",
+    "comments": true,
+    "exports": [
+      "html",
+      "pdf",
+      "png"
+    ]
+  }
+}

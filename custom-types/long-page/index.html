@@ -1,0 +1,80 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>长页排版 · Long Page</title>
+    <link rel="stylesheet" href="artifact-type/style.css" />
+  </head>
+  <body>
+    <div id="app" class="lp-shell" data-theme="light" data-viewport="desktop">
+      <header class="lp-topbar" aria-label="长页排版工具栏">
+        <div class="lp-brand">
+          <span class="lp-brand-dot" aria-hidden="true"></span>
+          <strong id="page-title-badge">长页排版</strong>
+          <span id="mode-badge" class="lp-badge">忠实精排</span>
+          <span id="save-status" class="lp-status" role="status">就绪</span>
+        </div>
+
+        <div class="lp-controls">
+          <div class="lp-seg" role="group" aria-label="视口预览切换">
+            <button id="vp-desktop-btn" type="button" class="lp-seg-btn is-active">桌面宽屏</button>
+            <button id="vp-mobile-btn" type="button" class="lp-seg-btn">手机 375px</button>
+          </div>
+          <label class="lp-field-inline">
+            <span>主题</span>
+            <select id="theme-select" aria-label="明暗主题切换">
+              <option value="light">亮色模式</option>
+              <option value="dark">暗色模式</option>
+              <option value="system">跟随系统</option>
+            </select>
+          </label>
+          <label class="lp-field-inline">
+            <span>字号</span>
+            <input id="font-size-range" type="range" min="15" max="19" step="1" value="16" aria-label="阅读字号" />
+            <span id="font-size-label">16px</span>
+          </label>
+          <label class="lp-field-inline" title="品牌强调色">
+            <span>强调色</span>
+            <input id="brand-color-picker" type="color" value="#2563EB" aria-label="强调色" />
+          </label>
+        </div>
+
+        <div class="lp-actions">
+          <button id="add-sec-btn" type="button" class="lp-btn">+ 加章节</button>
+          <button id="save-btn" type="button" class="lp-btn lp-btn-primary">保存</button>
+          <button id="export-html-btn" type="button" class="lp-btn">导出单文件 HTML</button>
+          <button id="print-pdf-btn" type="button" class="lp-btn">打印 / PDF</button>
+        </div>
+      </header>
+
+      <div id="cap-banner" class="lp-banner" hidden></div>
+
+      <div class="lp-layout">
+        <nav id="toc-nav" class="lp-toc" aria-label="章节目录"></nav>
+
+        <main class="lp-stage">
+          <div id="empty-state" class="lp-empty" hidden>
+            <h2>还没有长页内容</h2>
+            <p>可由 Agent 按 <code>SKILL.md</code> 选择「忠实精排」或「提炼解读」模式写入 <code>content.json</code>，或点击下方创建示例长页。</p>
+            <button id="seed-btn" type="button" class="lp-btn lp-btn-primary">✨ 创建示例长页</button>
+          </div>
+
+          <div id="viewport-frame" class="lp-viewport-frame">
+            <article id="article-root" class="lp-article" lang="zh-Hans"></article>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      // artifact.json
+      var key = "long-page";
+      var capabilities = { artifact: {}, downloads: {}, assets: {}, comments: {} };
+      var monitoring = {};
+      // end of artifact.json
+    </script>
+    <script src="artifact-type/app.js"></script>
+  </body>
+</html>

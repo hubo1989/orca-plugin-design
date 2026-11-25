@@ -1,0 +1,54 @@
+{
+  "slug": "social-cards",
+  "uid": "58a8c72e-6d3c-4f2b-9a81-c4e31e95d102",
+  "name": "社媒卡片",
+  "title": "社媒卡片 · Social Cards",
+  "description": "面向小红书 3:4 组图、公众号 21:9 头图与 1:1 分享方卡的结构化图文卡片编辑器，支持 OKLCH 品牌色约束、多主题切换与安全区溢出检测。",
+  "summary": "小红书 3:4 / 公众号 21:9 / 1:1 矩阵社媒图文卡片",
+  "artifactTitle": "未命名社媒卡片",
+  "category": "Design",
+  "icon": {
+    "file": "icon.svg"
+  },
+  "version": "0.1.0",
+  "i18n": {
+    "en": {
+      "name": "Social Cards",
+      "title": "Social Cards",
+      "summary": "Xiaohongshu 3:4 carousel, WeChat 21:9 cover & 1:1 share cards",
+      "description": "Structured social media card deck editor supporting Xiaohongshu 3:4 carousels, WeChat 21:9 headers, 1:1 share cards, OKLCH brand colors, and overflow rulers.",
+      "artifactTitle": "Untitled social cards"
+    }
+  },
+  "skill": "SKILL.md",
+  "intents": [
+    "social-cards",
+    "xiaohongshu",
+    "wechat-cover",
+    "share-card"
+  ],
+  "when": "When the person wants Chinese or bilingual social media image cards (Xiaohongshu 3:4 carousel, WeChat 21:9 header, 1:1 share card, or multi-size cover matrix).",
+  "templates": [
+    {
+      "id": "xhs-carousel",
+      "name": "小红书 3:4 知识组图",
+      "prompt": "帮我制作一组小红书 3:4 竖版知识卡片（1 张封面卡 + 3 张要点卡 + 1 张结尾卡），使用社媒卡片模板写入 content.json。主题是："
+    },
+    {
+      "id": "wechat-matrix",
+      "name": "公众号 21:9 头图 + 1:1 方卡",
+      "prompt": "帮我生成一组公众号文章封面矩阵（同时适配 21:9 头图与 1:1 次条/分享方卡），使用社媒卡片模板写入 content.json。文章标题与摘要："
+    }
+  ],
+  "engines": {
+    "openArtifact": ">=1"
+  },
+  "openArtifact": {
+    "store": "files",
+    "comments": true,
+    "exports": [
+      "png",
+      "zip"
+    ]
+  }
+}
