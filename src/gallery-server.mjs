@@ -37,6 +37,21 @@ import {
   openArtifactHome,
   readDaemon,
 } from './vendor/harness-kit.mjs';
+import {
+  readColumnsStore,
+  createColumn,
+  updateColumn,
+  dissolveColumn,
+  assignToColumn,
+  removeFromColumn,
+  getMembership,
+  syncRename,
+  nextIssueInfo,
+  registerPendingFolder,
+  resolvePendingFolders,
+  removeMembershipOnTrash,
+  restoreMembershipFromTrash,
+} from './columns-store.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
@@ -313,6 +328,9 @@ function moveFolder(from, to) {
 
 function trashArtifact(record, options = {}) {
   const movePhysical = options.moveFolder !== undefined ? options.moveFolder === true : true;
+  const ws = options.workspaceRoot !== undefined ? options.workspaceRoot : (readState().workspaceRoot || '');
+  const colMem = ws ? removeMembershipOnTrash(ws, record.root) : null;
+  const savedRecord = colMem ? { ...record, columnMembership: colMem } : record;
   const id = `${folderHash(record.root)}-${Date.now()}`;
   const entry = path.join(trashDir(), id);
   try {
@@ -323,7 +341,7 @@ function trashArtifact(record, options = {}) {
     }
   } catch {}
   fs.mkdirSync(entry, { recursive: true });
-  fs.writeFileSync(path.join(entry, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
+  fs.writeFileSync(path.join(entry, 'record.json'), `${JSON.stringify(savedRecord, null, 2)}\n`);
   const moved = movePhysical && isDeletable(record.skill, record.root);
   const p = path.join(entry, 'folder', path.basename(record.root));
   if (moved) moveFolder(record.root, p);
@@ -334,14 +352,20 @@ function trashArtifact(record, options = {}) {
 function restoreArtifact(id) {
   if (!TRASH_ID.test(id)) throw new Error('not a trash entry');
   const entry = path.join(trashDir(), id);
-  const record = readRecord(path.join(entry, 'record.json'));
-  if (record === null) throw new Error('nothing to put back');
+  const rawRecord = readRecord(path.join(entry, 'record.json'));
+  if (rawRecord === null) throw new Error('nothing to put back');
+  const colMem = rawRecord.columnMembership;
+  const { columnMembership: _cm, ...record } = rawRecord;
   const folder = path.join(entry, 'folder', path.basename(record.root));
   if (fs.existsSync(folder)) {
     if (fs.existsSync(record.root)) throw new Error(`${record.root} is taken`);
     moveFolder(folder, record.root);
   }
   writeRecord(record);
+  if (colMem?.seriesId) {
+    const ws = colMem.workspaceRoot || readState().workspaceRoot || '';
+    if (ws) restoreMembershipFromTrash(ws, record.root, colMem, record.id || '');
+  }
   fs.rmSync(entry, { recursive: true, force: true });
   return record;
 }
@@ -352,7 +376,7 @@ function cleanTitle(raw) {
   return title || null;
 }
 
-async function renameArtifact(skill, root, title) {
+async function renameArtifact(skill, root, title, newRoot = '') {
   const norm = normalizeTypeId(skill);
   const at = TITLES[norm];
   if (at) {
@@ -372,6 +396,10 @@ async function renameArtifact(skill, root, title) {
     if (rec.id) {
       await callDaemonApi('artifacts.update', { id: rec.id, title }).catch(() => {});
     }
+  }
+  if (newRoot && path.resolve(newRoot) !== path.resolve(root)) {
+    const ws = readState().workspaceRoot || '';
+    if (ws) syncRename(ws, root, newRoot);
   }
 }
 
@@ -740,6 +768,28 @@ async function listTypesInfo(wsRoot) {
   };
 }
 
+function attachColumnMetadata(views, workspaceRoot) {
+  if (!workspaceRoot) {
+    return {
+      views: views.map((v) => ({ ...v, seriesId: null, issueNumber: null, columnName: '' })),
+      columns: [],
+    };
+  }
+  const { store } = resolvePendingFolders(workspaceRoot, views);
+  const colMap = new Map(store.columns.map((c) => [c.seriesId, c]));
+  const enriched = views.map((v) => {
+    const mem = store.memberships[path.resolve(v.root)] || getMembership(workspaceRoot, v.root);
+    const col = mem ? colMap.get(mem.seriesId) : null;
+    return {
+      ...v,
+      seriesId: col ? col.seriesId : null,
+      issueNumber: col ? mem.issueNumber : null,
+      columnName: col ? col.name : '',
+    };
+  });
+  return { views: enriched, columns: store.columns };
+}
+
 async function listArtifactsViewsAsync() {
   const state = readState();
   const workspaceRoot = state.workspaceRoot || '';
@@ -868,9 +918,12 @@ async function listArtifactsViewsAsync() {
     return (b.openedAt || '').localeCompare(a.openedAt || '');
   });
 
+  const withCols = attachColumnMetadata(views, workspaceRoot);
+
   return {
     ok: true,
-    artifacts: views,
+    artifacts: withCols.views,
+    columns: withCols.columns,
     workspaceName: state.workspaceName || '',
     workspaceRoot,
     types: typesInfo.types,
@@ -957,9 +1010,12 @@ function listArtifactsViews() {
     return (b.openedAt || '').localeCompare(a.openedAt || '');
   });
 
+  const withCols = attachColumnMetadata(views, workspaceRoot);
+
   return {
     ok: true,
-    artifacts: views,
+    artifacts: withCols.views,
+    columns: withCols.columns,
     workspaceName: state.workspaceName || '',
     workspaceRoot,
   };
@@ -1362,7 +1418,65 @@ const GALLERY_STR = {
     "typesDisabled": "已停用",
     "runtimeStatusLabel": "运行时状态",
     "runtimeReadyShort": "已就绪（{source} · v{version}）",
-    "runtimeMissingShort": "未安装或下载中"
+    "runtimeMissingShort": "未安装或下载中",
+    "groupByColumn": "按专栏分组",
+    "flatView": "全部平铺",
+    "newColumn": "+ 新建专栏",
+    "nextIssueBtn": "+ 做新一期",
+    "nextIssueFromThis": "基于此期做新一期",
+    "issueCount": "{count} 期",
+    "matchedIssues": "匹配 {matched}/{total} 期",
+    "independentWorks": "独立作品 ({count})",
+    "columnEmptyHint": "该专栏暂无作品，点击「+ 做新一期」或从作品菜单归入。",
+    "createColumnTitle": "新建专栏",
+    "editColumnTitle": "编辑专栏",
+    "columnNameLabel": "专栏名称",
+    "columnNamePlaceholder": "例如：AI 产品拆解周刊",
+    "columnDescLabel": "专栏说明（可选）",
+    "columnDescPlaceholder": "固定风格、读者定位或常用模板偏好",
+    "columnDefaultTypeLabel": "默认产出类型（可选）",
+    "columnNoDefaultType": "不指定（新建时选择）",
+    "columnCreated": "✓ 已创建专栏「{name}」",
+    "columnUpdated": "✓ 已更新专栏「{name}」",
+    "columnCreateFailed": "创建专栏失败: ",
+    "columnUpdateFailed": "更新专栏失败: ",
+    "pinColumn": "置顶专栏",
+    "unpinColumn": "取消置顶专栏",
+    "sortDesc": "期号降序（最新在前）",
+    "sortAsc": "期号升序（最早在前）",
+    "editColumn": "编辑专栏",
+    "dissolveColumn": "解散专栏",
+    "dissolveConfirmTitle": "解散专栏「{name}」？",
+    "dissolveConfirmDesc": "仅解除专栏归组关系，组内作品将回到「独立作品」，绝不删除任何作品磁盘文件。",
+    "columnDissolved": "已解散专栏「{name}」，原作品文件保持不变",
+    "dissolveFailed": "解散专栏失败: ",
+    "assignToColumn": "归入专栏",
+    "moveToColumn": "移至其他专栏 / 调整期号",
+    "removeFromColumn": "移出专栏",
+    "removedFromColumn": "已移出专栏",
+    "assignColumnTitle": "归入专栏 · 「{title}」",
+    "assignExistingCol": "选择已有专栏",
+    "assignNewCol": "新建专栏并归入",
+    "issueNumberLabel": "期号",
+    "assignedToColumn": "✓ 已归入「{name}」第 #{num} 期",
+    "assignFailed": "归入专栏失败: ",
+    "nextIssueDialogTitle": "做新一期 · {name}",
+    "targetIssueLabel": "目标期号",
+    "referenceIssueLabel": "参考基准期",
+    "noReferenceIssue": "无参考期（按专栏定位新建）",
+    "outputTypeLabel": "产出类型",
+    "inheritStyleLabel": "沿用参考期视觉主题与版式",
+    "nextIssueTopicLabel": "本期主题 / 素材",
+    "nextIssueTopicPlaceholder": "输入本期主题、核心观点或粘贴待排版内容…",
+    "launchNextIssue": "🚀 启动 Agent 做新一期",
+    "launching": "正在启动…",
+    "nextIssueStarted": "✓ 已拉起 Agent 会话制作第 #{num} 期（{outcome}）",
+    "nextIssueCopiedFallback": "未能直接拉起 Agent，新一期提示词已复制到剪贴板，请直接粘贴发送",
+    "nextIssueFailed": "启动新一期失败: ",
+    "columnFilter": "专栏归属",
+    "colAll": "全部",
+    "colGrouped": "已归入专栏",
+    "colUngrouped": "未归组"
   },
   "en": {
     "works": "Projects",
@@ -1525,7 +1639,65 @@ const GALLERY_STR = {
     "typesDisabled": "Disabled",
     "runtimeStatusLabel": "Runtime status",
     "runtimeReadyShort": "Ready ({source} · v{version})",
-    "runtimeMissingShort": "Not installed or downloading"
+    "runtimeMissingShort": "Not installed or downloading",
+    "groupByColumn": "Group by column",
+    "flatView": "All flat",
+    "newColumn": "+ New column",
+    "nextIssueBtn": "+ Next issue",
+    "nextIssueFromThis": "New issue from this",
+    "issueCount": "{count} issues",
+    "matchedIssues": "{matched}/{total} matched",
+    "independentWorks": "Independent projects ({count})",
+    "columnEmptyHint": "No issues in this column yet. Click “+ Next issue” or assign an existing project.",
+    "createColumnTitle": "New column",
+    "editColumnTitle": "Edit column",
+    "columnNameLabel": "Column name",
+    "columnNamePlaceholder": "e.g. AI Product Weekly",
+    "columnDescLabel": "Description (optional)",
+    "columnDescPlaceholder": "Fixed style, audience, or preferred template notes",
+    "columnDefaultTypeLabel": "Default output type (optional)",
+    "columnNoDefaultType": "None (choose each time)",
+    "columnCreated": "✓ Created column “{name}”",
+    "columnUpdated": "✓ Updated column “{name}”",
+    "columnCreateFailed": "Failed to create column: ",
+    "columnUpdateFailed": "Failed to update column: ",
+    "pinColumn": "Pin column",
+    "unpinColumn": "Unpin column",
+    "sortDesc": "Issue order: newest first",
+    "sortAsc": "Issue order: oldest first",
+    "editColumn": "Edit column",
+    "dissolveColumn": "Dissolve column",
+    "dissolveConfirmTitle": "Dissolve column “{name}”?",
+    "dissolveConfirmDesc": "This only ungroups the items back to Independent projects. No artifact files on disk will be deleted.",
+    "columnDissolved": "Dissolved column “{name}”; all project files remain untouched",
+    "dissolveFailed": "Failed to dissolve column: ",
+    "assignToColumn": "Add to column",
+    "moveToColumn": "Move column / edit issue #",
+    "removeFromColumn": "Remove from column",
+    "removedFromColumn": "Removed from column",
+    "assignColumnTitle": "Assign column · “{title}”",
+    "assignExistingCol": "Existing column",
+    "assignNewCol": "Create new column & assign",
+    "issueNumberLabel": "Issue #",
+    "assignedToColumn": "✓ Added to “{name}” as #{num}",
+    "assignFailed": "Failed to assign column: ",
+    "nextIssueDialogTitle": "Next issue · {name}",
+    "targetIssueLabel": "Target issue",
+    "referenceIssueLabel": "Reference issue",
+    "noReferenceIssue": "None (start from column brief)",
+    "outputTypeLabel": "Output type",
+    "inheritStyleLabel": "Inherit reference visual theme & layout",
+    "nextIssueTopicLabel": "Topic / material for this issue",
+    "nextIssueTopicPlaceholder": "Enter this issue’s topic, key points, or draft notes…",
+    "launchNextIssue": "🚀 Launch Agent for next issue",
+    "launching": "Launching…",
+    "nextIssueStarted": "✓ Launched Agent chat for issue #{num} ({outcome})",
+    "nextIssueCopiedFallback": "Could not launch Agent directly; the next-issue prompt was copied to your clipboard.",
+    "nextIssueFailed": "Failed to start next issue: ",
+    "columnFilter": "Column",
+    "colAll": "All",
+    "colGrouped": "In a column",
+    "colUngrouped": "Ungrouped"
   }
 };
 
@@ -1737,6 +1909,31 @@ html[data-scheme=light] { color-scheme: light; }
 .runtime-bar-fill { height: 100%; background: var(--dsw-alias-state-business-primary); transition: width .2s ease; }
 .type-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; margin-bottom: 8px; }
 .type-row-meta { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+.bda-section-actions { display: inline-flex; align-items: center; gap: 8px; }
+.bda-chip-btn { height: 26px; padding: 0 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+.bda-chip-btn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.bda-chip-btn[data-active=true] { border-color: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-state-business-primary); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, var(--dsw-alias-bg-base)); }
+.bda-col-group { margin-bottom: 24px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; padding: 12px 14px 14px; background: var(--dsw-alias-bg-base); }
+.bda-col-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.bda-col-toggle { display: inline-flex; align-items: center; gap: 8px; border: 0; background: none; color: var(--dsw-alias-label-primary); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; padding: 2px 4px; border-radius: 6px; min-width: 0; }
+.bda-col-toggle:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.bda-col-chev { display: inline-flex; transition: transform .15s; color: var(--dsw-alias-label-tertiary); }
+.bda-col-group[data-collapsed=false] .bda-col-chev { transform: rotate(90deg); }
+.bda-col-badge { font-size: 11px; line-height: 16px; padding: 1px 7px; border-radius: 999px; background: var(--dsw-alias-bg-skeleton); color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
+.bda-col-type-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.bda-col-desc { font-size: 12px; color: var(--dsw-alias-label-tertiary); margin-top: 4px; padding-left: 22px; }
+.bda-col-hdr-actions { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.bda-col-body { margin-top: 12px; }
+.bda-col-body.hidden { display: none; }
+.bda-col-body .bda-list { padding-left: 16px; }
+.bda-col-empty { font-size: 12px; color: var(--dsw-alias-label-tertiary); padding: 12px 6px; }
+.bda-col-ungrouped-title { font-size: 13px; color: var(--dsw-alias-label-tertiary); margin: 8px 0 12px; }
+.bda-issue-badge { flex: none; font-size: 11px; font-weight: 600; line-height: 16px; padding: 1px 6px; border-radius: 6px; background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, var(--dsw-alias-bg-base)); color: var(--dsw-alias-state-business-primary); font-variant-numeric: tabular-nums; }
+.bda-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.bda-name-row .bda-name { flex: 1; min-width: 0; }
+.bda-field-label { display: block; font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary); margin: 0 0 6px; }
+.bda-dialog select, .bda-dialog textarea, .bda-dialog input[type=number] { width: 100%; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; outline: none; margin-bottom: 12px; }
+.bda-dialog textarea { min-height: 84px; resize: vertical; }
 .hidden { display: none !important; }
 </style>
 </head>
@@ -1781,7 +1978,13 @@ html[data-scheme=light] { color-scheme: light; }
       <div class="bda-section-title" data-i18n="workflows">${text('workflows')}</div>
       <ul class="bda-tiles" id="recipes" style="grid-template-columns:repeat(auto-fill,minmax(230px,1fr))"></ul>
 
-      <div class="bda-section-title" id="listHeading" data-i18n="allWorks">${text('allWorks')}</div>
+      <div class="bda-section-title">
+        <span id="listHeading" data-i18n="allWorks">${text('allWorks')}</span>
+        <span class="bda-section-actions">
+          <button type="button" class="bda-chip-btn hidden" id="groupModeBtn" data-i18n="groupByColumn">${text('groupByColumn')}</button>
+          <button type="button" class="bda-chip-btn" id="newColumnBtn" data-i18n="newColumn">${text('newColumn')}</button>
+        </span>
+      </div>
       <div id="container">
         <div class="bda-skeleton-grid"><div class="bda-skel-card"></div><div class="bda-skel-card"></div><div class="bda-skel-card"></div></div>
       </div>
@@ -1950,6 +2153,7 @@ function localizedMeta(item) {
 
 let state = {
   artifacts: [],
+  columns: [],
   types: [],
   runtime: null,
   loadedOnce: false,
@@ -1957,12 +2161,37 @@ let state = {
   workspaceRoot: '',
   search: '',
   viewMode: readPreference('ps_view_mode') || 'grid',
-  filters: { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false },
+  groupByColumn: readPreference('ps_group_by_column') !== '0',
+  collapsedCols: new Set((() => { try { return JSON.parse(readPreference('ps_collapsed_cols') || '[]'); } catch { return []; } })()),
+  filters: { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false, column: 'all' },
   openingRoot: null,
 };
 
 let embeddedView = null;
 let pendingWaitItem = null;
+
+async function copyText(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -2003,15 +2232,14 @@ window.addEventListener('click', (e) => {
   if (!e.target.closest('.bda-menu') && !e.target.closest('.bda-tool') && !e.target.closest('.bda-act')) closeMenu();
 });
 
-function matchesFilter(item) {
-  const q = state.search.trim().toLowerCase();
-  if (q) {
-    const label = (SKILL_MAP[item.skill] ? (skillText(item.skill, 'name') + ' ' + SKILL_MAP[item.skill].nameEn) : (item.typeTitle || item.skill));
-    const hay = (item.title + ' ' + (item.tail || '') + ' ' + item.skill + ' ' + label + ' ' + (item.note || '')).toLowerCase();
-    if (!hay.includes(q)) return false;
-  }
+function matchesNonSearchFilters(item) {
   if (state.filters.pinned && !item.pinned) return false;
   if (state.filters.types.length && !state.filters.types.includes(item.skill)) return false;
+  if (state.filters.column && state.filters.column !== 'all') {
+    if (state.filters.column === 'grouped' && !item.seriesId) return false;
+    if (state.filters.column === 'ungrouped' && item.seriesId) return false;
+    if (state.filters.column.startsWith('col:') && item.seriesId !== state.filters.column.slice(4)) return false;
+  }
   if (state.filters.sharing !== 'any') {
     if (state.filters.sharing === 'shared' && !item.shared) return false;
     if (state.filters.sharing === 'private' && item.shared) return false;
@@ -2028,8 +2256,19 @@ function matchesFilter(item) {
   return true;
 }
 
-function getSortedList() {
-  const list = state.artifacts.filter(matchesFilter);
+function matchesSearch(item) {
+  const q = state.search.trim().toLowerCase();
+  if (!q) return true;
+  const label = (SKILL_MAP[item.skill] ? (skillText(item.skill, 'name') + ' ' + SKILL_MAP[item.skill].nameEn) : (item.typeTitle || item.skill));
+  const hay = (item.title + ' ' + (item.tail || '') + ' ' + item.skill + ' ' + label + ' ' + (item.columnName || '') + ' ' + (item.note || '')).toLowerCase();
+  return hay.includes(q);
+}
+
+function matchesFilter(item) {
+  return matchesNonSearchFilters(item) && matchesSearch(item);
+}
+
+function sortArtifactItems(list) {
   const sort = state.filters.sort;
   list.sort((a, b) => {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
@@ -2040,8 +2279,12 @@ function getSortedList() {
   return list;
 }
 
+function getSortedList() {
+  return sortArtifactItems(state.artifacts.filter(matchesFilter));
+}
+
 function isFilterActive() {
-  return state.filters.sort !== 'opened' || state.filters.types.length > 0 || state.filters.date !== 'any' || state.filters.sharing !== 'any' || state.filters.pinned;
+  return state.filters.sort !== 'opened' || state.filters.types.length > 0 || state.filters.date !== 'any' || state.filters.sharing !== 'any' || state.filters.pinned || (state.filters.column && state.filters.column !== 'all');
 }
 
 function renderTiles() {
@@ -2060,68 +2303,157 @@ function renderTiles() {
   ).join('');
 }
 
+function renderCardsHtml(items) {
+  return '<ul class="bda-grid">' + items.map(it => {
+    const isOpening = state.openingRoot === it.root;
+    const tint = it.typeMissing ? '#71717a' : (TINTS[it.skill] || '#6366f1');
+    const badge = it.missing ? ('<span class="bda-missing-badge">' + t('missing') + '</span>')
+      : it.typeMissing ? ('<span class="bda-warn-badge">' + t('typeMissingBadge') + ' (' + esc(it.skill) + ')</span>')
+      : it.typeDisabled ? ('<span class="bda-warn-badge">' + t('typeDisabledBadge') + '</span>') : '';
+    const issueBadge = it.issueNumber ? ('<span class="bda-issue-badge">#' + it.issueNumber + '</span>') : '';
+    return '<li class="bda-item' + (it.missing ? ' bda-missing' : '') + '" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + tint + '">' +
+      '<button type="button" class="bda-card" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
+      '<span class="bda-preview"><span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
+      (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="' + t('projectPreview') + '"></iframe>' : '') +
+      (it.thumb ? '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">' : '') +
+      badge +
+      (isOpening ? ('<span class="bda-busy"><span class="bda-spinner"></span>' + t('opening') + '</span>') : '') +
+      '</span><span class="bda-info"><span class="bda-glyph">' + typeIconSvg(it.typeMissing ? '__unknown__' : it.skill, 18) + '</span>' +
+      '<span class="bda-text"><span class="bda-name-row">' + issueBadge + '<span class="bda-name" title="' + esc(it.title) + '">' + esc(it.title) + '</span></span>' +
+      '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + (it.note ? ' · ' + esc(it.note) : '') + '</span>' +
+      '</span></span></button>' +
+      '<div class="bda-actions"><button type="button" class="bda-act" data-act="more" title="' + t('more') + '">' + SVG_ICONS.more + '</button>' +
+      '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? t('unpin') : t('pin')) + '">' +
+      (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) + '</button></div></li>';
+  }).join('') + '</ul>';
+}
+
+function renderRowsHtml(items) {
+  return '<ul class="bda-list">' + items.map(it => {
+    const isOpening = state.openingRoot === it.root;
+    const tint = it.typeMissing ? '#71717a' : (TINTS[it.skill] || '#6366f1');
+    const issueBadge = it.issueNumber ? ('<span class="bda-issue-badge">#' + it.issueNumber + '</span>') : '';
+    return '<li class="bda-item' + (it.missing ? ' bda-missing' : '') + '" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + tint + '">' +
+      '<button type="button" class="bda-row" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
+      '<span class="bda-glyph">' + (isOpening ? '<span class="bda-spinner"></span>' : typeIconSvg(it.typeMissing ? '__unknown__' : it.skill, 18)) + '</span>' +
+      issueBadge +
+      '<span class="bda-name">' + esc(it.title) + (it.missing ? ' [' + esc(t('missing')) + ']' : '') + (it.typeMissing ? ' [' + esc(t('typeMissingBadge')) + ']' : '') + '</span>' +
+      '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + '</span>' +
+      '</button><div class="bda-row-tools">' +
+      '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '">' + (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) + '</button>' +
+      '<button type="button" class="bda-act" data-act="more">' + SVG_ICONS.more + '</button></div></li>';
+  }).join('') + '</ul>';
+}
+
 function renderItems() {
   if (!state.loadedOnce) return;
   const container = document.getElementById('container');
-  const items = getSortedList();
   const isGrid = state.viewMode === 'grid';
   document.getElementById('viewModeIcon').innerHTML = isGrid ? SVG_ICONS.list : SVG_ICONS.grid;
   document.getElementById('viewModeBtn').title = isGrid ? t('listView') : t('gridView');
   document.getElementById('filterBtn').setAttribute('data-active', isFilterActive() ? 'true' : 'false');
-  document.getElementById('listHeading').textContent = t('allWorksCount', {count: items.length});
 
-  if (!items.length) {
+  const hasColumns = Array.isArray(state.columns) && state.columns.length > 0;
+  const groupBtn = document.getElementById('groupModeBtn');
+  if (hasColumns) {
+    groupBtn.classList.remove('hidden');
+    groupBtn.textContent = state.groupByColumn ? t('groupByColumn') : t('flatView');
+    groupBtn.setAttribute('data-active', state.groupByColumn ? 'true' : 'false');
+  } else {
+    groupBtn.classList.add('hidden');
+  }
+
+  const renderEmpty = () => {
     container.innerHTML = '<div class="bda-empty">' + SVG_ICONS.info +
       '<h2>' + (state.search || isFilterActive() ? t('noMatches') : t('noWorks')) + '</h2>' +
       '<p>' + (state.search || isFilterActive() ? t('clearHint') : t('emptyHint')) + '</p>' +
       (isFilterActive() ? ('<button type="button" class="bda-btn" id="clearFilterBtn">' + t('clearFilters') + '</button>') : '') + '</div>';
     if (document.getElementById('clearFilterBtn')) {
       document.getElementById('clearFilterBtn').onclick = () => {
-        state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false };
+        state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false, column: 'all' };
         state.search = ''; document.getElementById('q').value = '';
         document.getElementById('clearSearch').className = 'hidden';
         renderItems();
       };
     }
+  };
+
+  if (!hasColumns || !state.groupByColumn) {
+    const items = getSortedList();
+    document.getElementById('listHeading').textContent = t('allWorksCount', { count: items.length });
+    if (!items.length) return renderEmpty();
+    container.innerHTML = isGrid ? renderCardsHtml(items) : renderRowsHtml(items);
+    activateLivePreviews(container);
     return;
   }
 
-  if (isGrid) {
-    container.innerHTML = '<ul class="bda-grid">' + items.map(it => {
-      const isOpening = state.openingRoot === it.root;
-      const tint = it.typeMissing ? '#71717a' : (TINTS[it.skill] || '#6366f1');
-      const badge = it.missing ? ('<span class="bda-missing-badge">' + t('missing') + '</span>')
-        : it.typeMissing ? ('<span class="bda-warn-badge">' + t('typeMissingBadge') + ' (' + esc(it.skill) + ')</span>')
-        : it.typeDisabled ? ('<span class="bda-warn-badge">' + t('typeDisabledBadge') + '</span>') : '';
-      return '<li class="bda-item' + (it.missing ? ' bda-missing' : '') + '" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + tint + '">' +
-        '<button type="button" class="bda-card" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
-        '<span class="bda-preview"><span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
-        (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="' + t('projectPreview') + '"></iframe>' : '') +
-        (it.thumb ? '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">' : '') +
-        badge +
-        (isOpening ? ('<span class="bda-busy"><span class="bda-spinner"></span>' + t('opening') + '</span>') : '') +
-        '</span><span class="bda-info"><span class="bda-glyph">' + typeIconSvg(it.typeMissing ? '__unknown__' : it.skill, 18) + '</span>' +
-        '<span class="bda-text"><span class="bda-name" title="' + esc(it.title) + '">' + esc(it.title) + '</span>' +
-        '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + (it.note ? ' · ' + esc(it.note) : '') + '</span>' +
-        '</span></span></button>' +
-        '<div class="bda-actions"><button type="button" class="bda-act" data-act="more" title="' + t('more') + '">' + SVG_ICONS.more + '</button>' +
-        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? t('unpin') : t('pin')) + '">' +
-        (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) + '</button></div></li>';
-    }).join('') + '</ul>';
-  } else {
-    container.innerHTML = '<ul class="bda-list">' + items.map(it => {
-      const isOpening = state.openingRoot === it.root;
-      const tint = it.typeMissing ? '#71717a' : (TINTS[it.skill] || '#6366f1');
-      return '<li class="bda-item" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + tint + '">' +
-        '<button type="button" class="bda-row" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
-        '<span class="bda-glyph">' + (isOpening ? '<span class="bda-spinner"></span>' : typeIconSvg(it.typeMissing ? '__unknown__' : it.skill, 18)) + '</span>' +
-        '<span class="bda-name">' + esc(it.title) + (it.typeMissing ? ' [' + esc(t('typeMissingBadge')) + ']' : '') + '</span>' +
-        '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + '</span>' +
-        '</button><div class="bda-row-tools">' +
-        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '">' + (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) + '</button>' +
-        '<button type="button" class="bda-act" data-act="more">' + SVG_ICONS.more + '</button></div></li>';
-    }).join('') + '</ul>';
+  const q = state.search.trim().toLowerCase();
+  const filtering = isFilterActive();
+  const sortedCols = [...state.columns].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+    return (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '');
+  });
+
+  const sections = [];
+  let totalShown = 0;
+
+  for (const col of sortedCols) {
+    if (state.filters.column === 'ungrouped') continue;
+    if (state.filters.column && state.filters.column.startsWith('col:') && state.filters.column.slice(4) !== col.seriesId) continue;
+
+    const allColItems = state.artifacts.filter(a => a.seriesId === col.seriesId);
+    const attrFiltered = allColItems.filter(matchesNonSearchFilters);
+    const colNameMatches = q && ((col.name || '').toLowerCase().includes(q) || (col.description || '').toLowerCase().includes(q));
+    const matched = q ? (colNameMatches ? attrFiltered : attrFiltered.filter(matchesSearch)) : attrFiltered;
+
+    if ((q || filtering) && matched.length === 0) continue;
+
+    matched.sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      const na = Number(a.issueNumber || 0), nb = Number(b.issueNumber || 0);
+      return col.sortOrder === 'asc' ? (na - nb) : (nb - na);
+    });
+    totalShown += matched.length;
+
+    const collapsed = state.collapsedCols.has(col.seriesId) && !q;
+    const countLabel = (q && !colNameMatches && matched.length < allColItems.length)
+      ? t('matchedIssues', { matched: matched.length, total: allColItems.length })
+      : t('issueCount', { count: matched.length });
+    const defTypeName = col.defaultType ? (SKILL_MAP[col.defaultType] ? skillText(col.defaultType, 'name') : col.defaultType) : '';
+
+    sections.push(
+      '<section class="bda-col-group" data-series-id="' + esc(col.seriesId) + '" data-collapsed="' + collapsed + '">' +
+      '<div class="bda-col-header">' +
+      '<button type="button" class="bda-col-toggle" data-col-act="toggle">' +
+      '<span class="bda-col-chev">' + SVG_ICONS.chevron + '</span>' +
+      (col.pinned ? '<span style="color:var(--dsw-alias-state-business-primary);display:inline-flex">' + SVG_ICONS.pinFilled + '</span>' : '') +
+      '<span>' + esc(col.name) + '</span>' +
+      '</button>' +
+      '<span class="bda-col-badge">' + esc(countLabel) + '</span>' +
+      (defTypeName ? ('<span class="bda-col-type-badge">' + typeIconSvg(col.defaultType, 14) + esc(defTypeName) + '</span>') : '') +
+      '<div class="bda-col-hdr-actions">' +
+      '<button type="button" class="bda-btn" style="height:28px;padding:0 10px;font-size:12px" data-primary="true" data-col-act="next">' + esc(t('nextIssueBtn')) + '</button>' +
+      '<button type="button" class="bda-tool" data-col-act="more" title="' + esc(t('more')) + '">' + SVG_ICONS.more + '</button>' +
+      '</div></div>' +
+      (col.description ? ('<div class="bda-col-desc">' + esc(col.description) + '</div>') : '') +
+      '<div class="bda-col-body' + (collapsed ? ' hidden' : '') + '">' +
+      (matched.length ? (isGrid ? renderCardsHtml(matched) : renderRowsHtml(matched)) : ('<div class="bda-col-empty">' + esc(t('columnEmptyHint')) + '</div>')) +
+      '</div></section>'
+    );
   }
+
+  const ungrouped = sortArtifactItems(state.artifacts.filter(a => !a.seriesId && matchesFilter(a)));
+  totalShown += ungrouped.length;
+  document.getElementById('listHeading').textContent = t('allWorksCount', { count: totalShown });
+
+  if (!sections.length && !ungrouped.length) return renderEmpty();
+
+  let html = sections.join('');
+  if (ungrouped.length) {
+    html += '<div class="bda-col-ungrouped-title">' + esc(t('independentWorks', { count: ungrouped.length })) + '</div>';
+    html += isGrid ? renderCardsHtml(ungrouped) : renderRowsHtml(ungrouped);
+  }
+  container.innerHTML = html;
   activateLivePreviews(container);
 }
 
@@ -2372,10 +2704,16 @@ function showActionsMenu(item, anchorEl) {
   const rect = anchorEl.getBoundingClientRect();
   const layer = document.getElementById('menuLayer');
   anchorEl.closest('.bda-item')?.setAttribute('data-menu', 'true');
+  const col = item.seriesId ? state.columns.find(c => c.seriesId === item.seriesId) : null;
   layer.innerHTML = '<div class="bda-menu" style="left:' + Math.min(rect.left, window.innerWidth - 220) + 'px;top:' + (rect.bottom + 6) + 'px">' +
     '<button type="button" class="bda-menu-item" data-menu-action="pin">' + SVG_ICONS.pin + '<span class="bda-menu-label">' + (item.pinned ? t('unpin') : t('pin')) + '</span><kbd class="bda-menu-key">P</kbd></button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="rename">' + SVG_ICONS.rename + '<span class="bda-menu-label">' + t('rename') + '</span><kbd class="bda-menu-key">R</kbd></button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="recreate">' + SVG_ICONS.info + '<span class="bda-menu-label">' + t('recreate') + '</span><kbd class="bda-menu-key">S</kbd></button>' +
+    '<div class="bda-menu-rule"></div>' +
+    (col ? ('<button type="button" class="bda-menu-item" data-menu-action="nextIssueFromThis"><span class="bda-menu-label">' + esc(t('nextIssueFromThis')) + '</span></button>') : '') +
+    '<button type="button" class="bda-menu-item" data-menu-action="assignColumn"><span class="bda-menu-label">' + esc(item.seriesId ? t('moveToColumn') : t('assignToColumn')) + '</span></button>' +
+    (item.seriesId ? ('<button type="button" class="bda-menu-item" data-menu-action="removeColumn"><span class="bda-menu-label">' + esc(t('removeFromColumn')) + '</span></button>') : '') +
+    '<div class="bda-menu-rule"></div>' +
     '<button type="button" class="bda-menu-item" data-menu-action="copy">' + SVG_ICONS.copy + '<span class="bda-menu-label">' + t('copyLink') + '</span><kbd class="bda-menu-key">C</kbd></button>' +
     (item.missing ? '<button type="button" class="bda-menu-item" data-menu-action="forget" data-danger="true">' + SVG_ICONS.trash + '<span class="bda-menu-label">' + t('forget') + '</span></button>' : '') +
     '<div class="bda-menu-rule"></div>' +
@@ -2391,20 +2729,276 @@ function showActionsMenu(item, anchorEl) {
       await reload();
     } else if (act === 'rename') {
       openRenameDialog(item);
+    } else if (act === 'nextIssueFromThis' && col) {
+      openNextIssueDialog(col, item.root);
+    } else if (act === 'assignColumn') {
+      openAssignColumnDialog(item);
+    } else if (act === 'removeColumn') {
+      const res = await api('/api/columns/remove-item', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
+      if (res.ok) { showToast(t('removedFromColumn')); await reload(); }
     } else if (act === 'recreate') {
       const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, skill: item.skill, title: item.title }) });
       if (res.ok) showToast(t('remixSent', {outcome: res.outcome || 'chat'}));
-      else { try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); } catch { showToast(t('remixFailed') + (res.error || '')); } }
+      else { const copied = await copyText(res.starter || ''); if (copied) showToast(t('draftCopied') + (res.error || '')); else showToast(t('remixFailed') + (res.error || '')); }
     } else if (act === 'forget') {
       const res = await api('/api/forget', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
       showToast(res.ok ? t('forgotten') : t('forgetFailed') + (res.error || ''));
       if (res.ok) await reload();
     } else if (act === 'copy') {
       const res = await api('/api/open', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ skill: item.skill, root: item.root }) });
-      if (res.ok && res.url) { await navigator.clipboard.writeText(res.url); showToast(t('linkCopied')); }
+      if (res.ok && res.url) { await copyText(res.url); showToast(t('linkCopied')); }
       else showToast(t('linkFailed'));
     } else if (act === 'delete') {
       openDeleteDialog(item);
+    }
+  };
+}
+
+function getAllTypeOptions() {
+  const seen = new Set();
+  const opts = [];
+  for (const s of SKILLS_CONFIG) {
+    seen.add(s.id);
+    opts.push({ id: s.id, name: skillText(s.id, 'name') });
+  }
+  for (const tp of (state.types || [])) {
+    if (!tp?.id || seen.has(tp.id) || tp.enabled === false) continue;
+    seen.add(tp.id);
+    opts.push({ id: tp.id, name: tp.name || tp.title || tp.id });
+  }
+  return opts;
+}
+
+function openColumnDialog(col = null) {
+  const isEdit = Boolean(col);
+  const typeOpts = getAllTypeOptions();
+  openDialog(
+    '<h2>' + esc(isEdit ? t('editColumnTitle') : t('createColumnTitle')) + '</h2>' +
+    '<label class="bda-field-label" for="colNameInput">' + esc(t('columnNameLabel')) + '</label>' +
+    '<input type="text" id="colNameInput" maxlength="80" value="' + esc(col?.name || '') + '" placeholder="' + esc(t('columnNamePlaceholder')) + '" autofocus>' +
+    '<label class="bda-field-label" for="colDescInput">' + esc(t('columnDescLabel')) + '</label>' +
+    '<textarea id="colDescInput" maxlength="500" placeholder="' + esc(t('columnDescPlaceholder')) + '">' + esc(col?.description || '') + '</textarea>' +
+    '<label class="bda-field-label" for="colTypeSelect">' + esc(t('columnDefaultTypeLabel')) + '</label>' +
+    '<select id="colTypeSelect"><option value="">' + esc(t('columnNoDefaultType')) + '</option>' +
+    typeOpts.map(o => '<option value="' + esc(o.id) + '"' + (col?.defaultType === o.id ? ' selected' : '') + '>' + esc(o.name) + '</option>').join('') +
+    '</select>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="colDlgCancel">' + t('cancel') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="colDlgSave">' + t('save') + '</button></div>'
+  );
+  const nameInput = document.getElementById('colNameInput');
+  nameInput.focus();
+  document.getElementById('colDlgCancel').onclick = closeDialog;
+  document.getElementById('colDlgSave').onclick = async () => {
+    const name = nameInput.value.trim();
+    if (!name) { nameInput.focus(); return; }
+    const description = document.getElementById('colDescInput').value.trim();
+    const defaultType = document.getElementById('colTypeSelect').value;
+    closeDialog();
+    const res = isEdit
+      ? await api('/api/columns/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ seriesId: col.seriesId, name, description, defaultType }) })
+      : await api('/api/columns/create', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ name, description, defaultType }) });
+    if (res.ok) {
+      showToast(t(isEdit ? 'columnUpdated' : 'columnCreated', { name }));
+      await reload();
+    } else {
+      showToast((isEdit ? t('columnUpdateFailed') : t('columnCreateFailed')) + (res.error || ''));
+    }
+  };
+}
+
+function openDissolveColumnDialog(col) {
+  openDialog(
+    '<h2>' + esc(t('dissolveConfirmTitle', { name: col.name })) + '</h2>' +
+    '<p>' + esc(t('dissolveConfirmDesc')) + '</p>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="disCancel">' + t('cancel') + '</button>' +
+    '<button type="button" class="bda-btn" data-danger="true" id="disConfirm">' + t('dissolveColumn') + '</button></div>'
+  );
+  document.getElementById('disCancel').onclick = closeDialog;
+  document.getElementById('disConfirm').onclick = async () => {
+    closeDialog();
+    const res = await api('/api/columns/dissolve', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ seriesId: col.seriesId }) });
+    if (res.ok) {
+      if (state.filters.column === 'col:' + col.seriesId) state.filters.column = 'all';
+      showToast(t('columnDissolved', { name: col.name }));
+      await reload();
+    } else {
+      showToast(t('dissolveFailed') + (res.error || ''));
+    }
+  };
+}
+
+function showColumnMenu(col, anchorEl) {
+  const rect = anchorEl.getBoundingClientRect();
+  const layer = document.getElementById('menuLayer');
+  const nextSort = col.sortOrder === 'asc' ? 'desc' : 'asc';
+  layer.innerHTML = '<div class="bda-menu" style="left:' + Math.min(rect.left, window.innerWidth - 230) + 'px;top:' + (rect.bottom + 6) + 'px">' +
+    '<button type="button" class="bda-menu-item" data-col-menu="pin">' + SVG_ICONS.pin + '<span class="bda-menu-label">' + esc(col.pinned ? t('unpinColumn') : t('pinColumn')) + '</span></button>' +
+    '<button type="button" class="bda-menu-item" data-col-menu="sort"><span class="bda-menu-label">' + esc(col.sortOrder === 'asc' ? t('sortDesc') : t('sortAsc')) + '</span></button>' +
+    '<button type="button" class="bda-menu-item" data-col-menu="edit">' + SVG_ICONS.rename + '<span class="bda-menu-label">' + esc(t('editColumn')) + '</span></button>' +
+    '<div class="bda-menu-rule"></div>' +
+    '<button type="button" class="bda-menu-item" data-col-menu="dissolve" data-danger="true">' + SVG_ICONS.trash + '<span class="bda-menu-label">' + esc(t('dissolveColumn')) + '</span></button></div>';
+
+  layer.querySelector('.bda-menu').onclick = async (e) => {
+    const btn = e.target.closest('[data-col-menu]');
+    if (!btn) return;
+    const act = btn.getAttribute('data-col-menu');
+    closeMenu();
+    if (act === 'pin') {
+      await api('/api/columns/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ seriesId: col.seriesId, pinned: !col.pinned }) });
+      await reload();
+    } else if (act === 'sort') {
+      await api('/api/columns/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ seriesId: col.seriesId, sortOrder: nextSort }) });
+      await reload();
+    } else if (act === 'edit') {
+      openColumnDialog(col);
+    } else if (act === 'dissolve') {
+      openDissolveColumnDialog(col);
+    }
+  };
+}
+
+function nextNumberForColumn(seriesId) {
+  const nums = state.artifacts.filter(a => a.seriesId === seriesId).map(a => Number(a.issueNumber || 0));
+  return (nums.length ? Math.max(...nums) : 0) + 1;
+}
+
+function openAssignColumnDialog(item) {
+  const hasCols = state.columns.length > 0;
+  const defaultSeriesId = item.seriesId || (hasCols ? state.columns[0].seriesId : '');
+  const defaultNum = item.seriesId ? (item.issueNumber || 1) : (defaultSeriesId ? nextNumberForColumn(defaultSeriesId) : 1);
+
+  openDialog(
+    '<h2>' + esc(t('assignColumnTitle', { title: item.title })) + '</h2>' +
+    (hasCols ? (
+      '<div style="display:flex;gap:12px;margin-bottom:12px;font-size:13px">' +
+      '<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="assignMode" value="existing" checked> ' + esc(t('assignExistingCol')) + '</label>' +
+      '<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="assignMode" value="new"> ' + esc(t('assignNewCol')) + '</label></div>'
+    ) : '') +
+    '<div id="assignExistingBox"' + (hasCols ? '' : ' class="hidden"') + '>' +
+    '<label class="bda-field-label" for="assignColSelect">' + esc(t('columnNameLabel')) + '</label>' +
+    '<select id="assignColSelect">' + state.columns.map(c => '<option value="' + esc(c.seriesId) + '"' + (c.seriesId === defaultSeriesId ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + '</select></div>' +
+    '<div id="assignNewBox"' + (hasCols ? ' class="hidden"' : '') + '>' +
+    '<label class="bda-field-label" for="assignNewColName">' + esc(t('columnNameLabel')) + '</label>' +
+    '<input type="text" id="assignNewColName" maxlength="80" placeholder="' + esc(t('columnNamePlaceholder')) + '"></div>' +
+    '<label class="bda-field-label" for="assignIssueNum">' + esc(t('issueNumberLabel')) + '</label>' +
+    '<input type="number" id="assignIssueNum" min="1" step="1" value="' + defaultNum + '">' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="assignCancel">' + t('cancel') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="assignSave">' + t('save') + '</button></div>'
+  );
+
+  const numInput = document.getElementById('assignIssueNum');
+  const colSelect = document.getElementById('assignColSelect');
+  if (colSelect) {
+    colSelect.onchange = () => {
+      const sid = colSelect.value;
+      numInput.value = (sid === item.seriesId && item.issueNumber) ? item.issueNumber : nextNumberForColumn(sid);
+    };
+  }
+  document.querySelectorAll('input[name="assignMode"]').forEach(r => {
+    r.onchange = () => {
+      const isNew = r.value === 'new' && r.checked;
+      document.getElementById('assignExistingBox').classList.toggle('hidden', isNew);
+      document.getElementById('assignNewBox').classList.toggle('hidden', !isNew);
+      if (isNew) numInput.value = 1;
+      else if (colSelect) colSelect.onchange();
+    };
+  });
+  document.getElementById('assignCancel').onclick = closeDialog;
+  document.getElementById('assignSave').onclick = async () => {
+    const modeEl = document.querySelector('input[name="assignMode"]:checked');
+    const isNew = !hasCols || modeEl?.value === 'new';
+    let targetSeriesId = colSelect?.value || '';
+    let targetColName = state.columns.find(c => c.seriesId === targetSeriesId)?.name || '';
+    if (isNew) {
+      const newName = document.getElementById('assignNewColName').value.trim();
+      if (!newName) { document.getElementById('assignNewColName').focus(); return; }
+      const cRes = await api('/api/columns/create', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ name: newName, defaultType: item.skill }) });
+      if (!cRes.ok) { showToast(t('columnCreateFailed') + (cRes.error || '')); return; }
+      targetSeriesId = cRes.column.seriesId;
+      targetColName = cRes.column.name;
+    }
+    const issueNumber = Math.max(1, Math.floor(Number(numInput.value) || 1));
+    closeDialog();
+    const res = await api('/api/columns/assign', {
+      method: 'POST',
+      headers: {'content-type':'application/json'},
+      body: JSON.stringify({ root: item.root, seriesId: targetSeriesId, issueNumber, skill: item.skill, artifactId: item.id || '' }),
+    });
+    if (res.ok) {
+      showToast(t('assignedToColumn', { name: targetColName, num: res.membership.issueNumber }));
+      await reload();
+    } else {
+      showToast(t('assignFailed') + (res.error || ''));
+    }
+  };
+}
+
+function openNextIssueDialog(col, preferredRefRoot = '') {
+  const colItems = state.artifacts
+    .filter(a => a.seriesId === col.seriesId && !a.missing)
+    .sort((a, b) => Number(b.issueNumber || 0) - Number(a.issueNumber || 0));
+  const nextNum = nextNumberForColumn(col.seriesId);
+  const defaultRef = preferredRefRoot
+    ? (colItems.find(a => a.root === preferredRefRoot) || colItems[0] || null)
+    : (colItems[0] || null);
+  const defaultType = defaultRef?.skill || col.defaultType || 'slides';
+  const typeOpts = getAllTypeOptions();
+
+  openDialog(
+    '<h2>' + esc(t('nextIssueDialogTitle', { name: col.name })) + '</h2>' +
+    '<p>' + esc(t('targetIssueLabel')) + ': <strong>#' + nextNum + '</strong></p>' +
+    '<label class="bda-field-label" for="niRefSelect">' + esc(t('referenceIssueLabel')) + '</label>' +
+    '<select id="niRefSelect">' +
+    (colItems.length
+      ? colItems.map(a => '<option value="' + esc(a.root) + '"' + (defaultRef?.root === a.root ? ' selected' : '') + '>#' + (a.issueNumber || '?') + ' · ' + esc(a.title) + '</option>').join('')
+      : '<option value="">' + esc(t('noReferenceIssue')) + '</option>') +
+    (colItems.length ? ('<option value="">' + esc(t('noReferenceIssue')) + '</option>') : '') +
+    '</select>' +
+    '<label class="bda-field-label" for="niTypeSelect">' + esc(t('outputTypeLabel')) + '</label>' +
+    '<select id="niTypeSelect">' +
+    typeOpts.map(o => '<option value="' + esc(o.id) + '"' + (defaultType === o.id ? ' selected' : '') + '>' + esc(o.name) + '</option>').join('') +
+    '</select>' +
+    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer"><input type="checkbox" id="niInheritChk" checked><span>' + esc(t('inheritStyleLabel')) + '</span></label>' +
+    '<label class="bda-field-label" for="niTopicInput">' + esc(t('nextIssueTopicLabel')) + '</label>' +
+    '<textarea id="niTopicInput" placeholder="' + esc(t('nextIssueTopicPlaceholder')) + '"></textarea>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="niCancel">' + t('cancel') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="niLaunchBtn">' + esc(t('launchNextIssue')) + '</button></div>'
+  );
+
+  const topicEl = document.getElementById('niTopicInput');
+  topicEl.focus();
+  document.getElementById('niCancel').onclick = closeDialog;
+  document.getElementById('niLaunchBtn').onclick = async () => {
+    const launchBtn = document.getElementById('niLaunchBtn');
+    launchBtn.disabled = true;
+    launchBtn.textContent = t('launching');
+    const referenceRoot = document.getElementById('niRefSelect').value;
+    const skill = document.getElementById('niTypeSelect').value;
+    const inheritStyle = document.getElementById('niInheritChk').checked;
+    const topic = topicEl.value.trim();
+    try {
+      const res = await api('/api/start', {
+        method: 'POST',
+        headers: {'content-type':'application/json'},
+        body: JSON.stringify({ action: 'next-issue', seriesId: col.seriesId, referenceRoot, skill, inheritStyle, topic }),
+      });
+      closeDialog();
+      if (res.ok) {
+        showToast(t('nextIssueStarted', { num: res.issueNumber || nextNum, outcome: res.outcome || 'chat' }));
+      } else if (res.starter) {
+        const copied = await copyText(res.starter);
+        if (copied) showToast(t('nextIssueCopiedFallback'));
+        else showToast(t('nextIssueFailed') + (res.error || ''));
+      } else {
+        showToast(t('nextIssueFailed') + (res.error || ''));
+      }
+    } catch (err) {
+      closeDialog();
+      showToast(t('nextIssueFailed') + err.message);
     }
   };
 }
@@ -2577,6 +3171,13 @@ function showFilterMenu(anchorEl) {
   const sortLabels = { opened: t('sortOpened'), updated: t('sortUpdated'), created: t('sortCreated'), name: t('sortName') };
   const dateLabels = { any: t('any'), today: t('today'), yesterday: t('yesterday'), week: t('week'), month: t('month') };
   const shareLabels = { any: t('any'), shared: t('shared'), private: t('private') };
+  const colOptions = [
+    ['all', t('colAll'), state.artifacts.length],
+    ['grouped', t('colGrouped'), state.artifacts.filter(a => a.seriesId).length],
+    ['ungrouped', t('colUngrouped'), state.artifacts.filter(a => !a.seriesId).length],
+    ...(state.columns || []).map(c => ['col:' + c.seriesId, c.name, state.artifacts.filter(a => a.seriesId === c.seriesId).length]),
+  ];
+  const curColLabel = (colOptions.find(o => o[0] === state.filters.column) || colOptions[0])[1];
 
   layer.innerHTML = '<div class="bda-menu" style="right:' + (window.innerWidth - rect.right) + 'px;top:' + (rect.bottom + 6) + 'px">' +
     '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('sortBy') + '</span><span class="bda-menu-value">' + sortLabels[state.filters.sort] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
@@ -2588,6 +3189,8 @@ function showFilterMenu(anchorEl) {
       const label = SKILL_MAP[id] ? skillText(id, 'name') : id;
       return '<button type="button" class="bda-menu-item" data-toggle-type="' + esc(id) + '"><span class="bda-check" data-on="' + on + '">' + (on ? SVG_ICONS.tick : '') + '</span><span class="bda-menu-label">' + esc(label) + '</span><span class="bda-menu-count">' + (typeCounts.get(id) || 0) + '</span></button>';
     }).join('') + '</div></div>' +
+    '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('columnFilter') + '</span><span class="bda-menu-value">' + esc(curColLabel) + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
+    '<div class="bda-submenu">' + colOptions.map(([k, v, cnt]) => '<button type="button" class="bda-menu-item" data-set-col="' + esc(k) + '"><span class="bda-menu-label">' + esc(v) + '</span><span class="bda-menu-count">' + cnt + '</span>' + (state.filters.column === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>').join('') + '</div></div>' +
     '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('openedAt') + '</span><span class="bda-menu-value">' + dateLabels[state.filters.date] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
     '<div class="bda-submenu">' + Object.entries(dateLabels).map(([k, v]) => '<button type="button" class="bda-menu-item" data-set-date="' + k + '"><span class="bda-menu-label">' + v + '</span>' + (state.filters.date === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>').join('') + '</div></div>' +
     '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('sharing') + '</span><span class="bda-menu-value">' + shareLabels[state.filters.sharing] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
@@ -2599,10 +3202,11 @@ function showFilterMenu(anchorEl) {
   layer.querySelector('.bda-menu').onclick = (e) => {
     const tSort = e.target.closest('[data-set-sort]'); if (tSort) { state.filters.sort = tSort.getAttribute('data-set-sort'); closeMenu(); renderItems(); return; }
     const tType = e.target.closest('[data-toggle-type]'); if (tType) { const sk = tType.getAttribute('data-toggle-type'); state.filters.types = state.filters.types.includes(sk) ? state.filters.types.filter(x => x !== sk) : [...state.filters.types, sk]; closeMenu(); renderItems(); return; }
+    const tCol = e.target.closest('[data-set-col]'); if (tCol) { state.filters.column = tCol.getAttribute('data-set-col'); closeMenu(); renderItems(); return; }
     const tDate = e.target.closest('[data-set-date]'); if (tDate) { state.filters.date = tDate.getAttribute('data-set-date'); closeMenu(); renderItems(); return; }
     const tShare = e.target.closest('[data-set-share]'); if (tShare) { state.filters.sharing = tShare.getAttribute('data-set-share'); closeMenu(); renderItems(); return; }
     if (e.target.closest('[data-toggle-pinned]')) { state.filters.pinned = !state.filters.pinned; closeMenu(); renderItems(); return; }
-    if (e.target.closest('[data-clear-filters]')) { state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false }; closeMenu(); renderItems(); }
+    if (e.target.closest('[data-clear-filters]')) { state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false, column: 'all' }; closeMenu(); renderItems(); }
   };
 }
 
@@ -2637,6 +3241,25 @@ document.getElementById('recipes').onclick = async (e) => {
   else { try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); } catch { showToast(t('workflowFailed') + (res.error || '')); } }
 };
 document.getElementById('container').onclick = async (e) => {
+  const colBtn = e.target.closest('[data-col-act]');
+  if (colBtn) {
+    const grp = colBtn.closest('.bda-col-group');
+    const sid = grp?.getAttribute('data-series-id');
+    const col = state.columns.find(c => c.seriesId === sid);
+    if (!col) return;
+    const cAct = colBtn.getAttribute('data-col-act');
+    if (cAct === 'toggle') {
+      if (state.collapsedCols.has(sid)) state.collapsedCols.delete(sid);
+      else state.collapsedCols.add(sid);
+      writePreference('ps_collapsed_cols', JSON.stringify([...state.collapsedCols]));
+      renderItems();
+    } else if (cAct === 'next') {
+      openNextIssueDialog(col);
+    } else if (cAct === 'more') {
+      showColumnMenu(col, colBtn);
+    }
+    return;
+  }
   const itemEl = e.target.closest('.bda-item'); if (!itemEl) return;
   const item = state.artifacts.find(a => a.root === itemEl.getAttribute('data-root')); if (!item) return;
   const btn = e.target.closest('button[data-act]'); if (!btn) return;
@@ -2645,6 +3268,12 @@ document.getElementById('container').onclick = async (e) => {
   else if (act === 'pin') { await api('/api/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, pinned: !item.pinned }) }); await reload(); }
   else if (act === 'more') showActionsMenu(item, btn);
 };
+document.getElementById('groupModeBtn').onclick = () => {
+  state.groupByColumn = !state.groupByColumn;
+  writePreference('ps_group_by_column', state.groupByColumn ? '1' : '0');
+  renderItems();
+};
+document.getElementById('newColumnBtn').onclick = () => openColumnDialog();
 
 const qInput = document.getElementById('q'), clearSearchBtn = document.getElementById('clearSearch');
 qInput.oninput = () => { state.search = qInput.value; clearSearchBtn.className = state.search ? '' : 'hidden'; renderItems(); };
@@ -2667,6 +3296,7 @@ async function reload() {
     if (res.ok) {
       state.loadedOnce = true;
       state.artifacts = res.artifacts || [];
+      state.columns = res.columns || [];
       state.types = res.types || [];
       state.runtime = res.runtime || state.runtime;
       state.workspaceName = res.workspaceName || '';
@@ -2754,9 +3384,101 @@ function cleanAgentId(v) {
   return String(v || 'claude').replace(/[^a-z0-9-]/gi, '').slice(0, 32) || 'claude';
 }
 
+function buildNextIssueStarter({ column, issueNumber, folderPath, refItem, skillId, skillMeta, customType, topic, inheritStyle }) {
+  const typeName = skillMeta ? skillMeta.name : (customType?.name || skillId);
+  const lines = [
+    `请为专栏「${column.name}」创作第 #${issueNumber} 期（${typeName} / ${skillId}）。`,
+  ];
+  if (column.description) {
+    lines.push(`专栏定位说明：${column.description}`);
+  }
+  lines.push(`目标期号：#${issueNumber}`);
+  if (refItem?.root) {
+    lines.push(`参考期作品路径：${refItem.root}${refItem.title ? `（标题：${refItem.title}）` : ''}`);
+    if (inheritStyle !== false) {
+      lines.push(`风格继承要求：请先查看参考期作品 ${refItem.root} 的视觉主题、配色、字体排版与版式结构，沿用同一套设计语言，仅替换为本期新内容。`);
+    }
+  } else if (inheritStyle !== false) {
+    lines.push(`风格继承要求：请保持专栏「${column.name}」一贯的视觉主题、配色与版式规范。`);
+  }
+  lines.push(`目标输出目录（已预登记自动归入本专栏）：${folderPath}`);
+  if (skillMeta?.prompt) {
+    lines.push(`类型指令参考：${skillMeta.prompt.split('\n')[0]}`);
+  } else {
+    lines.push(`类型指令参考：使用 Open Artifact 类型 \`${skillId}\` 创建作品。`);
+  }
+  const cleanTopic = String(topic || '').trim();
+  lines.push(`本期主题与素材：${cleanTopic || '（请先向我确认本期主题后再生成）'}`);
+  return lines.join('\n');
+}
+
+async function startNextIssue(input, agent) {
+  const ws = readState().workspaceRoot || '';
+  if (!ws) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+  if (!fs.existsSync(ws) || !fs.statSync(ws).isDirectory()) {
+    return { ok: false, error: `工作区路径在本机不可见（远程工作区或未挂载）：${ws}` };
+  }
+  if (isInstalledPluginPath(ws)) {
+    return { ok: false, error: '当前工作区是 Orca 插件安装路径，请切换到其他工作区' };
+  }
+  const seriesId = String(input.seriesId || '').trim();
+  const info = nextIssueInfo(ws, seriesId);
+  if (!info.ok) return { ok: false, error: info.error };
+
+  const reg = registerPendingFolder(ws, {
+    folderPath: info.folderPath,
+    seriesId: info.column.seriesId,
+    issueNumber: info.issueNumber,
+  });
+  if (!reg.ok) return { ok: false, error: reg.error };
+
+  const views = listArtifactsViews().artifacts;
+  const colItems = views
+    .filter((a) => a.seriesId === info.column.seriesId && !a.missing)
+    .sort((a, b) => (b.issueNumber || 0) - (a.issueNumber || 0));
+
+  let refItem = null;
+  if (input.referenceRoot) {
+    const reqRef = path.resolve(String(input.referenceRoot));
+    refItem = colItems.find((a) => path.resolve(a.root) === reqRef)
+      || views.find((a) => path.resolve(a.root) === reqRef)
+      || findArtifact(reqRef)
+      || { root: reqRef, title: path.basename(reqRef) };
+  } else if (colItems.length) {
+    refItem = colItems[0];
+  }
+
+  const skillId = normalizeTypeId(input.skill || refItem?.skill || info.column.defaultType || 'slides') || 'slides';
+  const skillMeta = SKILL_BY_ID[skillId] || null;
+  const customType = !skillMeta ? scanCustomTypesLocal(ws).types.find((t) => t.id === skillId) : null;
+
+  const starter = buildNextIssueStarter({
+    column: info.column,
+    issueNumber: info.issueNumber,
+    folderPath: info.folderPath,
+    refItem,
+    skillId,
+    skillMeta,
+    customType,
+    topic: input.topic,
+    inheritStyle: input.inheritStyle !== false,
+  });
+
+  const launched = await launchAgent(starter, agent);
+  return {
+    ...launched,
+    seriesId: info.column.seriesId,
+    issueNumber: info.issueNumber,
+    folderPath: info.folderPath,
+  };
+}
+
 async function startFromArtifact(input) {
   const agent = cleanAgentId(input.agent);
   if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+  if (input.action === 'next-issue') {
+    return startNextIssue(input, agent);
+  }
   if (input.legacyMigrate) {
     const starter = `请协助检查并无损转换升级旧版设计作品目录：${input.legacyMigrate}（类型：${input.skill || ''}）。\n先备份原文件后再修复格式差异。报错信息：${input.error || ''}`;
     return launchAgent(starter, agent);
@@ -2840,13 +3562,15 @@ const server = http.createServer(async (req, res) => {
 
   const allowedGet = [
     '/', '/api/health', '/api/list', '/api/preview', '/api/thumb',
-    '/api/types', '/api/runtime/status', '/api/runtime/events',
+    '/api/types', '/api/columns', '/api/runtime/status', '/api/runtime/events',
     '/vendor/harness-embed.mjs',
   ];
   const allowedPost = [
     '/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore',
     '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor',
     '/api/start', '/api/register', '/api/forget',
+    '/api/columns/create', '/api/columns/update', '/api/columns/dissolve',
+    '/api/columns/assign', '/api/columns/remove-item',
     '/api/runtime/retry', '/api/runtime/import',
     '/api/types/toggle', '/api/types/trust-project', '/api/types/install',
   ];
@@ -2864,6 +3588,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/list') return res.end(JSON.stringify(await listArtifactsViewsAsync()));
     if (url.pathname === '/api/types') return res.end(JSON.stringify(await listTypesInfo(readState().workspaceRoot)));
+    if (url.pathname === '/api/columns') {
+      const ws = readState().workspaceRoot || '';
+      const store = readColumnsStore(ws);
+      return res.end(JSON.stringify({ ok: true, workspaceRoot: ws, ...store }));
+    }
     if (url.pathname === '/api/runtime/status') return res.end(JSON.stringify({ ok: true, ...getRuntimeStatus() }));
     if (url.pathname === '/api/runtime/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive' });
@@ -2955,14 +3684,66 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/start') return finish(await startFromArtifact(input));
     if (url.pathname === '/api/forget') {
-      const rec = findArtifact(String(input.root || ''));
-      if (!rec) return finish({ ok: false, error: '未找到记录' });
+      const targetRoot = String(input.root || '');
+      const rec = findArtifact(targetRoot);
+      const ws = readState().workspaceRoot || '';
+      const mem = ws && targetRoot ? getMembership(ws, targetRoot) : null;
+      if (!rec && !mem) return finish({ ok: false, error: '未找到记录' });
       try {
-        fs.rmSync(recordFile(rec.root), { force: true });
+        if (rec) fs.rmSync(recordFile(rec.root), { force: true });
+        if (ws && targetRoot) removeFromColumn(ws, targetRoot);
         return finish({ ok: true });
       } catch (err) {
         return finish({ ok: false, error: err.message });
       }
+    }
+    if (url.pathname === '/api/columns/create') {
+      const ws = readState().workspaceRoot || '';
+      const out = createColumn(ws, input);
+      if (!out.ok) res.statusCode = 400;
+      return finish(out.ok ? { ok: true, column: out.column, columns: out.store.columns } : out);
+    }
+    if (url.pathname === '/api/columns/update') {
+      const ws = readState().workspaceRoot || '';
+      const out = updateColumn(ws, String(input.seriesId || ''), input);
+      if (!out.ok) res.statusCode = 400;
+      return finish(out.ok ? { ok: true, column: out.column, columns: out.store.columns } : out);
+    }
+    if (url.pathname === '/api/columns/dissolve') {
+      const ws = readState().workspaceRoot || '';
+      const out = dissolveColumn(ws, String(input.seriesId || ''));
+      if (!out.ok) res.statusCode = 400;
+      return finish(out.ok ? { ok: true, removedMemberships: out.removedMemberships, columns: out.store.columns } : out);
+    }
+    if (url.pathname === '/api/columns/assign') {
+      const ws = readState().workspaceRoot || '';
+      const targetRoot = String(input.root || '').trim();
+      if (!targetRoot || !allowedArtifactRoot(targetRoot)) {
+        res.statusCode = 400;
+        return finish({ ok: false, error: '作品路径无效或不在工作区内' });
+      }
+      let rec = findArtifact(targetRoot);
+      if (!rec && fs.existsSync(targetRoot)) {
+        const scanned = scanDesignProjects(ws).find((x) => path.resolve(x.root) === path.resolve(targetRoot));
+        const inferredSkill = normalizeTypeId(input.skill || scanned?.skill || '');
+        if (inferredSkill && Object.hasOwn(SKILL_BY_ID, inferredSkill)) {
+          const regRes = registerArtifact({ skill: inferredSkill, root: targetRoot, title: scanned?.title });
+          if (regRes.ok) rec = regRes.record;
+        }
+      }
+      const out = assignToColumn(ws, {
+        root: targetRoot,
+        seriesId: String(input.seriesId || ''),
+        issueNumber: input.issueNumber,
+        artifactId: String(input.artifactId || rec?.id || ''),
+      });
+      if (!out.ok) res.statusCode = 400;
+      return finish(out.ok ? { ok: true, membership: out.membership, columns: out.store.columns } : out);
+    }
+    if (url.pathname === '/api/columns/remove-item') {
+      const ws = readState().workspaceRoot || '';
+      const out = removeFromColumn(ws, String(input.root || ''));
+      return finish({ ok: true, removed: out.removed, columns: out.store?.columns || [] });
     }
     if (url.pathname === '/api/update') {
       let rec = findArtifact(root);
@@ -3012,7 +3793,7 @@ const server = http.createServer(async (req, res) => {
       const clean = cleanTitle(input.name || input.title);
       if (!clean) return finish({ ok: false, error: 'invalid title' });
       try {
-        await renameArtifact(skill, root, clean);
+        await renameArtifact(skill, root, clean, input.newRoot || '');
         return finish({ ok: true });
       } catch (e) {
         return finish({ ok: false, error: e.message });
@@ -3100,6 +3881,8 @@ export {
   galleryHtml,
   findArtifact,
   writeRecord,
+  startFromArtifact,
+  buildNextIssueStarter,
   GALLERY_STR,
   dshHome,
   server,
