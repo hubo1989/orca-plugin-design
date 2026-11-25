@@ -1,0 +1,143 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>社媒卡片 · Social Cards</title>
+    <link rel="stylesheet" href="artifact-type/style.css" />
+  </head>
+  <body>
+    <div id="app" class="sc-shell" data-theme="editorial-light" data-format="xhs-3-4">
+      <header class="sc-topbar" aria-label="编辑器工具栏">
+        <div class="sc-brand">
+          <span class="sc-brand-dot" aria-hidden="true"></span>
+          <strong id="deck-title-badge">社媒卡片</strong>
+          <span id="save-status" class="sc-status" role="status">就绪</span>
+        </div>
+        <div class="sc-controls">
+          <label class="sc-field-inline">
+            <span>画幅</span>
+            <select id="format-select" aria-label="画幅选择">
+              <option value="xhs-3-4">小红书 3:4 (1080×1440)</option>
+              <option value="wechat-21-9">公众号头图 21:9 (900×383)</option>
+              <option value="square-1-1">分享方卡 1:1 (1080×1080)</option>
+              <option value="matrix">封面矩阵 (21:9 + 1:1 + 3:4)</option>
+            </select>
+          </label>
+          <label class="sc-field-inline">
+            <span>主题</span>
+            <select id="theme-select" aria-label="主题选择">
+              <option value="editorial-light">杂志亮色</option>
+              <option value="warm-paper">暖纸手账</option>
+              <option value="editorial-dark">深邃暗色</option>
+              <option value="swiss-grid">瑞士网格</option>
+            </select>
+          </label>
+          <label class="sc-field-inline sc-color-control" title="输入主品牌色（自动按 OKLCH 安全约束并校验对比度）">
+            <span>品牌色</span>
+            <input id="brand-color-picker" type="color" value="#E8703A" aria-label="品牌色选择器" />
+            <input id="brand-color-hex" type="text" value="#E8703A" maxlength="7" spellcheck="false" aria-label="品牌色十六进制" />
+            <span id="brand-oklch-note" class="sc-pill"></span>
+          </label>
+          <label class="sc-toggle">
+            <input id="ruler-toggle" type="checkbox" checked />
+            <span>安全区/溢出标尺</span>
+          </label>
+        </div>
+        <div class="sc-actions">
+          <button id="add-card-btn" type="button" class="sc-btn">+ 加卡片</button>
+          <button id="save-btn" type="button" class="sc-btn sc-btn-primary">保存</button>
+          <button id="export-html-btn" type="button" class="sc-btn">导出预览 HTML</button>
+          <button id="export-json-btn" type="button" class="sc-btn">下载 JSON</button>
+          <button id="print-btn" type="button" class="sc-btn">打印 / PDF</button>
+        </div>
+      </header>
+
+      <div id="cap-banner" class="sc-banner" hidden></div>
+
+      <main class="sc-workspace">
+        <section class="sc-stage-wrap" aria-label="卡片画布预览区">
+          <div id="empty-state" class="sc-empty" hidden>
+            <h2>还没有卡片内容</h2>
+            <p>你可以让 Agent 按 <code>SKILL.md</code> 生成一组社媒卡片，或先点击下方按钮创建示例卡片。</p>
+            <button id="seed-btn" type="button" class="sc-btn sc-btn-primary">✨ 创建示例组图</button>
+          </div>
+          <div id="stage-grid" class="sc-stage-grid"></div>
+        </section>
+
+        <aside id="inspector" class="sc-inspector" aria-label="当前卡片属性编辑">
+          <div class="sc-inspector-head">
+            <h2>卡片微调</h2>
+            <div class="sc-card-nav">
+              <button id="move-up-btn" type="button" class="sc-btn sc-btn-sm" title="上移">↑</button>
+              <button id="move-down-btn" type="button" class="sc-btn sc-btn-sm" title="下移">↓</button>
+              <button id="dup-card-btn" type="button" class="sc-btn sc-btn-sm" title="复制本卡">复制</button>
+              <button id="del-card-btn" type="button" class="sc-btn sc-btn-sm sc-btn-danger" title="删除本卡">删除</button>
+            </div>
+          </div>
+          <form id="card-form" class="sc-form" autocomplete="off">
+            <label>
+              <span>作品标题 / 系列标签</span>
+              <input id="deck-title-input" type="text" placeholder="例如：AI 产品周刊" />
+            </label>
+            <div class="sc-row-2">
+              <label>
+                <span>专栏角标</span>
+                <input id="series-tag-input" type="text" placeholder="专栏 · 第 01 期" />
+              </label>
+              <label>
+                <span>作者署名</span>
+                <input id="author-input" type="text" placeholder="@作者" />
+              </label>
+            </div>
+            <hr class="sc-sep" />
+            <div class="sc-row-2">
+              <label>
+                <span>本卡版式</span>
+                <select id="card-layout-input">
+                  <option value="cover">封面主卡 (cover)</option>
+                  <option value="points">要点列表 (points)</option>
+                  <option value="quote">金句引文 (quote)</option>
+                  <option value="comparison">对比双栏 (comparison)</option>
+                  <option value="ending">结尾引导 (ending)</option>
+                </select>
+              </label>
+              <label>
+                <span>角标 / 页码</span>
+                <input id="card-badge-input" type="text" placeholder="01 / 04" />
+              </label>
+            </div>
+            <label>
+              <span>卡片标题</span>
+              <textarea id="card-title-input" rows="2" placeholder="输入主标题"></textarea>
+            </label>
+            <label>
+              <span>副标题 / 导语</span>
+              <textarea id="card-subtitle-input" rows="2" placeholder="输入副标题或核心观点"></textarea>
+            </label>
+            <label>
+              <span>要点列表（每行一条）</span>
+              <textarea id="card-points-input" rows="5" placeholder="每行一条要点"></textarea>
+            </label>
+            <label>
+              <span>底部脚注</span>
+              <input id="card-footnote-input" type="text" placeholder="底部提示或来源" />
+            </label>
+            <div id="overflow-report" class="sc-overflow-box" aria-live="polite"></div>
+          </form>
+        </aside>
+      </main>
+    </div>
+
+    <script>
+      // artifact.json
+      var key = "social-cards";
+      var capabilities = { artifact: {}, downloads: {}, assets: {}, comments: {} };
+      var monitoring = {};
+      // end of artifact.json
+    </script>
+    <script src="artifact-type/color-theme.js"></script>
+    <script src="artifact-type/app.js"></script>
+  </body>
+</html>
