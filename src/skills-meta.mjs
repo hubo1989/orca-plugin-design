@@ -240,9 +240,13 @@ export const TINTS = Object.fromEntries(
   Object.entries(SKILL_BY_ID).map(([k, s]) => [k, s.tint])
 );
 
-export const FOLDER = Object.fromEntries(
-  Object.entries(SKILL_BY_ID).map(([k, s]) => [k, s.folder])
-);
+export const FOLDER = {
+  ...Object.fromEntries(
+    Object.entries(SKILL_BY_ID).map(([k, s]) => [k, s.folder])
+  ),
+  'social-cards': ['.artifact.json', 'content.json', '_blobs'],
+  'long-page': ['.artifact.json', 'content.json', '_blobs'],
+};
 
 export const ROOT_MARKERS = Object.fromEntries(
   Object.entries(SKILL_BY_ID).map(([k, s]) => [k, s.detect])
@@ -256,26 +260,69 @@ export const RECIPES = [
   {
     id: 'ds-to-all',
     title: '设计系统 → 全家统一',
+    titleEn: 'Design system → Unified projects',
     desc: '先做一套设计系统，再用它的 token 做幻灯片',
+    descEn: 'Build a design system, then create slides with its tokens.',
     template: '帮我先在当前工作区建立一套设计系统（品牌、色板、字体、间距），完成后基于这套设计系统的 token 直接做一份幻灯片，两步连续完成，风格保持统一。品牌是：',
   },
   {
     id: 'canvas-to-motion',
     title: '画布多稿 → 动效演示',
+    titleEn: 'Canvas concepts → Motion demo',
     desc: '画布上探索几版设计，选优后做成动效',
+    descEn: 'Explore canvas concepts, choose one, then animate it.',
     template: '帮我在画布上并排做 3 版设计方案探索，比较后选出最优一版，然后把选中的方案做成一段动效演示。主题是：',
   },
   {
     id: 'data-to-report',
     title: '数据 → 看板 → 汇报',
+    titleEn: 'Data → Dashboard → Report',
     desc: '先做数据看板，再产出汇报幻灯片',
+    descEn: 'Build a data dashboard, then create a presentation.',
     template: '帮我先做一个数据看板（指标、图表、布局），看板完成后基于看板内容做一份汇报幻灯片，要点直接取自看板数据。数据是：',
   },
   {
     id: 'explore-to-ds',
     title: '画布探索 → 沉淀设计系统',
+    titleEn: 'Canvas exploration → Design system',
     desc: '画布上试风格，定稿后沉淀成设计系统',
+    descEn: 'Explore visual directions, then capture a reusable design system.',
     template: '帮我在画布上探索一个产品的视觉方向（多稿），定稿后把确定的风格沉淀成一套可复用的设计系统。产品是：',
+  },
+  {
+    id: 'humanize-to-long-page',
+    title: '去 AI 味 → 长页精排',
+    titleEn: 'Humanize → Long Page',
+    desc: '先按 Humanizer-zh 原则改自然，再用 long-page 精排成阅读页',
+    descEn: 'Polish prose with Humanizer-zh first, then lay out a CJK long-page artifact.',
+    usesHumanizer: true,
+    template: '请先阅读本插件内置的 `vendor/humanizer-zh/SKILL.md`（MIT 协议）润色下面素材：严格保留事实、数字与不确定程度，去除模板化 AI 表达；润色定稿后使用 Open Artifact 自定义类型 `long-page` 在当前工作区 `.design/` 下生成精排长页（`content.json`）。待处理文本或路径：',
+  },
+  {
+    id: 'humanize-to-social-cards',
+    title: '去 AI 味 → 社媒卡片',
+    titleEn: 'Humanize → Social Cards',
+    desc: '先去 AI 味提炼核心观点，再用 social-cards 出小红书/公众号组图',
+    descEn: 'Humanize copy & distill key takeaways, then build Xiaohongshu/WeChat social cards.',
+    usesHumanizer: true,
+    template: '请先阅读本插件内置的 `vendor/humanizer-zh/SKILL.md`（MIT 协议）对素材做去 AI 味润色并提炼核心要点（不编造事实或数据），然后调用 Open Artifact 自定义类型 `social-cards` 在当前工作区 `.design/` 下制作小红书 3:4 知识组图或公众号头图（写入 `content.json`）。素材内容：',
+  },
+  {
+    id: 'long-page-and-cards',
+    title: '长页与卡片双出口',
+    titleEn: 'Long Page + Social Cards dual export',
+    desc: '一篇文章先出 long-page 精排，再派生同配色 social-cards 卡片组',
+    descEn: 'Publish a long-page article first, then derive matching-theme social cards.',
+    template: '请将以下文章先使用 Open Artifact `long-page` 精排成阅读长页，随后沿用同一套品牌主色（brandColor）与主题基调，派生一组 `social-cards` 社媒卡片（小红书 3:4 + 公众号 21:9）放到当前工作区 `.design/` 下。文章内容或路径：',
+  },
+  {
+    id: 'slides-to-long-page',
+    title: '幻灯片演讲回收',
+    titleEn: 'Slides → Long Page recap',
+    desc: '读取已有 slides 演讲备注，去 AI 味后整理为 long-page 长文',
+    descEn: 'Turn an existing slides deck & speaker notes into a humanized long-page article.',
+    usesHumanizer: true,
+    template: '请读取当前工作区已有幻灯片作品（`project/deck.json` 与 `project/slides/` 演讲备注），结合本插件内置 `vendor/humanizer-zh/SKILL.md` 去除模板化表达后，整理并排版为一篇结构清晰的 `long-page` 长页文章（保留原文实证与数据）。目标幻灯片目录或名称：',
   },
 ];
 

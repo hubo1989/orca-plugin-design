@@ -12,7 +12,7 @@ if [[ $# -gt 0 && "${1:-}" != "--full" ]]; then
   exit 2
 fi
 
-INCLUDE=(orca-plugin.json package.json LICENSE NOTICE.md README.md assets references src templates tools vendor)
+INCLUDE=(orca-plugin.json package.json LICENSE NOTICE.md README.md assets custom-types references src templates tools vendor)
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -37,16 +37,25 @@ manifest = json.loads((out / "orca-plugin.json").read_text())
 required = [
     manifest["main"],
     "src/columns-store.mjs",
+    "src/export-render.mjs",
+    "src/extra-types.mjs",
     "src/gallery-server.mjs",
     "src/runtime-manager.mjs",
     "src/post-guard.mjs",
     "src/skills-meta.mjs",
+    "src/voice-store.mjs",
     "src/examples.json",
     "src/vendor/harness-kit.mjs",
     "src/vendor/harness-embed.mjs",
     "vendor/runtime-manifest.json",
     "vendor/LICENSE.open-artifact",
     "vendor/NOTICE.open-artifact",
+    "vendor/humanizer-zh/LICENSE",
+    "vendor/humanizer-zh/SKILL.md",
+    "custom-types/social-cards/artifact-type.json",
+    "custom-types/social-cards/index.html",
+    "custom-types/long-page/artifact-type.json",
+    "custom-types/long-page/index.html",
     "tools/thumb.mjs",
     "tools/vendor-open-artifact.mjs",
     "templates/starter.proto.html",

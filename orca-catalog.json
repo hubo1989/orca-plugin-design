@@ -10,7 +10,7 @@
         "url": "https://github.com/hubo1989/orca-plugin-design.git",
         "ref": "main"
       },
-      "description": "Orca-Design — 五类设计作品（幻灯片/设计/设计系统/看板/动效）在一个项目库 Tab 中管理",
+      "description": "Orca-Design — 9 类内置作品、自研 .oatype 模板（社媒卡片/长页排版）、专栏归组与 MIT 去 AI 味/语气档案工作台在一个项目库 Tab 中管理",
       "homepage": "https://github.com/hubo1989/orca-plugin-design",
       "categories": [
         "design",

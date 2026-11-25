@@ -2,7 +2,7 @@
 
 ![Orca-Design 项目库](assets/cover.png)
 
-把 [Open Artifact](https://github.com/JimLiu/open-artifact) 设计工作流带进 Orca 工作区：支持 **9 类内置作品（幻灯片、设计画布、设计系统、白板、电子表格、数据看板、协作文档、短动画、自由页面）+ 自定义 `.oatype` 类型 + 老 `.design/` 兼容**，状态栏一个图标（或 `Mod+Alt+P`）打开项目库，同 Tab 内嵌 Open Artifact Shell 编辑器。
+把 [Open Artifact](https://github.com/JimLiu/open-artifact) 设计工作流带进 Orca 工作区：支持 **9 类内置作品（幻灯片、设计画布、设计系统、白板、电子表格、数据看板、协作文档、短动画、自由页面）+ 自研 `.oatype` 模板（`social-cards` 社媒卡片 / `long-page` 长页排版）+ 专栏归组/做新一期 + MIT 去 AI 味与语气档案 + 老 `.design/` 兼容**，状态栏一个图标（或 `Mod+Alt+P`）打开项目库，同 Tab 内嵌 Open Artifact Shell 编辑器。
 
 | 项目库 | 画布编辑器 |
 | :---: | :---: |
@@ -38,12 +38,19 @@
 2. **按需后台下载**：缺失时严格校验 `vendor/runtime-manifest.json` 的 `sha512` 完整性（主源 `registry.npmjs.org`，失败自动删包切换 `registry.npmmirror.com`），原子解压至 `~/.agents/open-artifact/runtime/<version>/`。
 3. **离线 `.tgz` 导入**：无外网环境可在面板「类型与运行时」或下载等待页直接导入本地 `@open-artifact/cli-<version>.tgz`。
 
+## 自研 `.oatype` 模板、专栏归组与写作工作台
+
+- **预装自研模板（MIT）**：Worker 与项目库启动时自动将 `custom-types/social-cards`（小红书 3:4 / 公众号 21:9 / 1:1 矩阵）与 `custom-types/long-page`（CJK T1–T10 忠实精排 / 提炼解读双模式）同步至 `<ORCA_DESIGN_HOME>/extra-types/`，并幂等写入 `<OPEN_ARTIFACT_HOME>/settings.json` `typeRoots.extra`（`trusted: true`），开箱即用。
+- **离线导出路由（`/api/export-render`）**：支持无头 Chromium CDP 导出 2x 组图 PNG/ZIP、移动端超长图 PNG、分页 PDF 与纯前端单文件离线 HTML；未检测到本地浏览器时返回 `browser_missing` 友好指引。
+- **专栏归组 / 做新一期**：无侵入轻索引（`<ORCA_DESIGN_HOME>/columns/`），支持网格/列表分组折叠、10 秒删除撤销期号还原，以及「做新一期 × 语气档案 × 去 AI 味 × 自研模板主题继承」联动拉起会话。
+- **MIT 去 AI 味 + 语气档案**：内置 MIT 协议的 `vendor/humanizer-zh/`（`op7418/Humanizer-zh`）与 4 条中文内容生产工作流；语气档案以 `0600` 权限存放于 `<ORCA_DESIGN_HOME>/voice/voice-profile.md`，支持粘贴/本地文档建档、用户主动确认的对话筛选补充及一键物理彻底清空（`POST /api/voice/purge`）。
+
 ## 数据落在哪
 
 | 内容 | 位置 |
 | --- | --- |
 | 作品本体 | `<工作区>/.design/<名称>/` 或工作区 `artifacts/` |
-| 应用数据目录 | `~/Library/Application Support/orca/orca-design`（支持 `ORCA_DESIGN_HOME` 覆盖，自动只读复制迁移旧 `baoyu-design/` 数据） |
+| 应用数据目录 | `~/Library/Application Support/orca/orca-design`（含 `columns/`、`voice/`、`extra-types/`、`artifacts/`、`trash/`，支持 `ORCA_DESIGN_HOME` 覆盖） |
 | 共享运行时 | `~/.agents/open-artifact/runtime/<version>/`（支持 `OPEN_ARTIFACT_HOME` 覆盖） |
 | 项目库服务 | `127.0.0.1:3480`，独立进程，worker 被回收后库页仍可用 |
 
@@ -58,5 +65,6 @@ bash bin/package.sh                         # 组装 dist（< 8 MiB）并 valida
 
 ## 许可证
 
-- **插件本体**：MIT License（见 `LICENSE`）。
+- **插件本体、专栏、语气档案与自研 `.oatype` 模板**：MIT License（见 `LICENSE`）。
 - **Open Artifact Harness SDK 与按需运行时**：Apache License 2.0（见 `NOTICE.md` 与 `vendor/LICENSE.open-artifact`）。
+- **去 AI 味技能指导（`vendor/humanizer-zh/`）**：MIT License（见 `vendor/humanizer-zh/LICENSE` 与 `NOTICE.md`）。
