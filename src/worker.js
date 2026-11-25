@@ -10,6 +10,7 @@ import {
   normalizeTypeId,
 } from './skills-meta.mjs';
 import { ensureRuntime, getRuntimeStatus } from './runtime-manager.mjs';
+import { syncBundledExtraTypes } from './extra-types.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
@@ -450,6 +451,15 @@ export default async function activate(orca) {
     }
   }
   reg('prototype.gallery', async () => openGalleryTab());
+
+  try {
+    const syncRes = syncBundledExtraTypes({ pluginRoot });
+    if (syncRes.synced?.length) {
+      orca.log(`Synced bundled extra-types (${syncRes.synced.join(', ')}) -> ${syncRes.extraRoot}`);
+    }
+  } catch (e) {
+    orca.log(`Bundled extra-types sync warning: ${e.message}`);
+  }
 
   if (process.env.ORCA_DESIGN_NO_PREWARM !== '1') {
     startTabCacheLoop();

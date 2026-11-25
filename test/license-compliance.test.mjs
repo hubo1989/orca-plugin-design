@@ -30,7 +30,7 @@ test('removed legacy closed-source assets and runtime tarball do not exist', () 
 });
 
 test('shipped directories contain zero LicenseRef-Mixed, Anthropic, or AGPL residuals', () => {
-  const dirs = ['src', 'tools', 'vendor', 'references', 'templates', 'bin'];
+  const dirs = ['src', 'tools', 'vendor', 'custom-types', 'references', 'templates', 'bin'];
   const files = ['LICENSE', 'NOTICE.md', 'README.md', 'package.json', 'orca-plugin.json'];
   const targets = files.map((f) => path.join(ROOT, f));
 
@@ -53,6 +53,15 @@ test('shipped directories contain zero LicenseRef-Mixed, Anthropic, or AGPL resi
       assert.equal(text.includes(term), false, `Found forbidden term ${term} in ${path.relative(ROOT, file)}`);
     }
   }
+});
+
+test('Humanizer-zh MIT license and NOTICE attributions are present', () => {
+  const humLic = fs.readFileSync(path.join(ROOT, 'vendor', 'humanizer-zh', 'LICENSE'), 'utf8');
+  const humSkill = fs.readFileSync(path.join(ROOT, 'vendor', 'humanizer-zh', 'SKILL.md'), 'utf8');
+  const notice = fs.readFileSync(path.join(ROOT, 'NOTICE.md'), 'utf8');
+  assert.ok(humLic.includes('MIT License'), 'vendor/humanizer-zh/LICENSE must declare MIT License');
+  assert.ok(humSkill.includes('name: humanizer-zh'), 'vendor/humanizer-zh/SKILL.md must exist');
+  assert.ok(notice.includes('Humanizer-zh') && notice.includes('Apache License 2.0') && notice.includes('MIT License'));
 });
 
 test('GALLERY_STR zh and en have 100% key parity and cover all t() calls', async () => {

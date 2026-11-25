@@ -53,3 +53,24 @@
 ### 交给上游
 
 - 无新增。
+
+## 0.3.0 · 2026-11-26（Open Artifact 方案 B 分体架构 + 专栏 + MIT 内容工作台合龙）
+
+### 已修（带根因）
+
+- **打包清单漏包含 `custom-types/` 导致已安装插件无法预装自研模板**：`bin/package.sh` `INCLUDE` 此前仅列了 `assets references src templates tools vendor`，未包含 `custom-types`。修复：将 `custom-types` 纳入 `INCLUDE` 与包内完备性断言清单，并保持总包体 `< 8 MiB`。
+- **预装 `.oatype` 与运行中 Daemon 热重载衔接**：仅写环境变量在外部工具先启动 Daemon 时会被忽略。修复：新增 `src/extra-types.mjs` 在 Worker 与 `:3480` 启动时将 `custom-types/{social-cards,long-page}` 同步至 `<ORCA_DESIGN_HOME>/extra-types/` 并幂等登记进 `<OPEN_ARTIFACT_HOME>/settings.json` `typeRoots.extra`，若运行中 Daemon 尚未加载则自动调 `types.enable` 触发热重载。
+- **MIT 语气档案隐私与会话读取降级**：`orca agent read` 对部分 Agent（如 `antigravity`）返回 `agent_no_transcript`。修复：`POST /api/voice/scan-sessions` 仅由用户显式点击触发，严格过滤仅保留用户角色 `>= 60` 字自然语言段落，CLI 不可用/无转录时平滑退化引导粘贴文本或选择工作区 `.md/.txt`。
+- **老 `.design/` 浏览不产生 Git dirty + `0600` 隔离**：列表只读扫描懒式纳管；语气档案落盘 `<ORCA_DESIGN_HOME>/voice/voice-profile.md`（目录 `0700`、文件 `0600`）并支持 `POST /api/voice/purge` 物理彻底清除。
+
+### 不是插件的问题
+
+- 工作区沙箱禁止本地回环端口连接（`EPERM 127.0.0.1`）与 Chromium Mach 端口（`MachPortRendezvousServer Permission denied`）：HTTP 集成测试与无头 Chromium 渲染测试需在非沙箱环境执行，单测层以 Mock CDP 覆盖导出契约。
+
+### 待验证
+
+- Stage 5 QA（HUB-286）在非沙箱真机环境执行 `AC-1` ~ `AC-12` 全量回归、方案 B 真实拉包/复用与无头 Chromium 2x 组图/超长图/PDF 实机视觉截图验收。
+
+### 交给上游
+
+- 延续 0.2.0：期待上游后续提供跨 `chat | terminal` 按 `orca_session_id` 投递消息 API 与插件 `mcpServers/skills` 声明支持，以便未来升级原生 L3 评论唤醒。

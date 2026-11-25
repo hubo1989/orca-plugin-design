@@ -52,6 +52,26 @@ import {
   removeMembershipOnTrash,
   restoreMembershipFromTrash,
 } from './columns-store.mjs';
+import {
+  exportRender,
+  CARD_PRESETS,
+  SUPPORTED_EXPORT_FORMATS,
+} from './export-render.mjs';
+import {
+  syncBundledExtraTypes,
+  BUNDLED_CUSTOM_TYPES,
+} from './extra-types.mjs';
+import {
+  readVoiceStatus,
+  saveVoiceProfile,
+  saveVoiceSamples,
+  purgeVoiceData,
+  listWorkspaceTextDocs,
+  validateSampleFilePath,
+  scanOrcaSessionsForVoice,
+  VOICE_PROFILE_TEMPLATE,
+  voiceProfilePath,
+} from './voice-store.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
@@ -240,6 +260,16 @@ function registerArtifact(input) {
 
 function artifactTitle(skill, root) {
   const norm = normalizeTypeId(skill);
+  if (norm === 'social-cards' || norm === 'long-page') {
+    for (const rel of ['content.json', '.artifact.json']) {
+      try {
+        const val = JSON.parse(fs.readFileSync(path.join(root, rel), 'utf8'))?.title;
+        const title = typeof val === 'string' ? val.trim() : '';
+        if (title) return title;
+      } catch {}
+    }
+    return '';
+  }
   const at = TITLES[norm];
   if (!at) return '';
   try {
@@ -495,6 +525,16 @@ function projectMeta(skillId, root) {
     return count ? `${count} 标签页` : '文档';
   }
   if (norm === 'page') return '自由页面';
+  if (norm === 'social-cards') {
+    const sc = read('content.json');
+    const count = Array.isArray(sc?.cards) ? sc.cards.length : 0;
+    return count ? `${count} 张卡片` : '社媒卡片';
+  }
+  if (norm === 'long-page') {
+    const lp = read('content.json');
+    const count = Array.isArray(lp?.sections) ? lp.sections.length : 0;
+    return count ? `${count} 章节` : '长页排版';
+  }
   return '';
 }
 
@@ -581,10 +621,41 @@ function previewEntry(root, skill) {
 
 // ---- Open Artifact Daemon & Harness-Kit 代理层 ----
 
+let extraTypesSyncedOnce = false;
+async function ensureExtraTypesReady({ hotReload = true } = {}) {
+  let syncRes = null;
+  if (!extraTypesSyncedOnce) {
+    try {
+      syncRes = syncBundledExtraTypes({
+        pluginRoot,
+        designHome: dshHome(),
+        oaHome: openArtifactHome(),
+      });
+      extraTypesSyncedOnce = true;
+    } catch {
+      syncRes = null;
+    }
+  }
+  if (hotReload) {
+    try {
+      const state = await readDaemon(openArtifactHome());
+      if (state) {
+        const res = await daemonApi(state, 'types', undefined, { signal: AbortSignal.timeout(1000) }).catch(() => null);
+        const ids = new Set((res?.types || []).map((t) => t?.id));
+        if (BUNDLED_CUSTOM_TYPES.some((id) => !ids.has(id))) {
+          await daemonApi(state, 'types.enable', { id: 'social-cards' }).catch(() => {});
+        }
+      }
+    } catch { /* ignore daemon hot-reload errors */ }
+  }
+  return syncRes;
+}
+
 let harnessInstance = null;
 let harnessPromise = null;
 
 async function ensureHarnessConnected() {
+  await ensureExtraTypesReady({ hotReload: false });
   if (harnessInstance && harnessInstance.connected) return harnessInstance;
   if (harnessPromise) return harnessPromise;
   harnessPromise = (async () => {
@@ -692,7 +763,10 @@ function scanCustomTypesLocal(wsRoot) {
         id: e.name,
         title: m.title || m.name || e.name,
         name: m.name || m.title || e.name,
+        nameEn: m.i18n?.en?.name || '',
+        titleEn: m.i18n?.en?.title || '',
         description: m.description || m.summary || '',
+        descriptionEn: m.i18n?.en?.description || m.i18n?.en?.summary || '',
         category: m.category || 'Custom',
         version: m.version || '0.1.0',
         scope: r.scope,
@@ -702,6 +776,10 @@ function scanCustomTypesLocal(wsRoot) {
         network: Array.isArray(m.openArtifact?.network) ? m.openArtifact.network : [],
         detect: Array.isArray(m.detect) ? m.detect : [],
         exports: m.openArtifact?.exports || [],
+        templates: Array.isArray(m.templates) ? m.templates : [],
+        blankCreatable: BUNDLED_CUSTOM_TYPES.includes(e.name),
+        selfBuilt: r.scope === 'extra' && BUNDLED_CUSTOM_TYPES.includes(e.name),
+        tint: e.name === 'social-cards' ? '#e8703a' : (e.name === 'long-page' ? '#2563eb' : '#6366f1'),
         dir,
       });
     }
@@ -710,6 +788,7 @@ function scanCustomTypesLocal(wsRoot) {
 }
 
 async function listTypesInfo(wsRoot) {
+  await ensureExtraTypesReady({ hotReload: false });
   const localCustom = scanCustomTypesLocal(wsRoot);
   const builtinViews = SKILLS.map((s) => ({
     id: s.id,
@@ -743,20 +822,23 @@ async function listTypesInfo(wsRoot) {
   }
 
   const byId = new Map();
+  const localCustomById = new Map(localCustom.types.map((ct) => [ct.id, ct]));
   for (const b of builtinViews) byId.set(b.id, b);
   for (const dt of daemonTypes) {
     if (!dt?.id) continue;
     const prev = byId.get(dt.id);
+    const localCt = localCustomById.get(dt.id);
     byId.set(dt.id, {
+      ...(localCt || {}),
       ...(prev || {}),
       ...dt,
       builtin: prev?.builtin || dt.scope === 'builtin',
-      tint: prev?.tint || '#6366f1',
+      tint: prev?.tint || localCt?.tint || '#6366f1',
     });
   }
   for (const ct of localCustom.types) {
     if (!byId.has(ct.id)) {
-      byId.set(ct.id, { ...ct, builtin: false, tint: '#6366f1' });
+      byId.set(ct.id, { ...ct, builtin: false, tint: ct.tint || '#6366f1' });
     }
   }
   return {
@@ -928,6 +1010,7 @@ async function listArtifactsViewsAsync() {
     workspaceRoot,
     types: typesInfo.types,
     runtime: getRuntimeStatus(),
+    voice: { exists: readVoiceStatus().exists },
   };
 }
 
@@ -1095,6 +1178,7 @@ async function openSkillEditor(skillInput, rootInput) {
   }
 
   try {
+    await ensureExtraTypesReady({ hotReload: true });
     const state = await getDaemonState({ start: true });
     if (!state) {
       return {
@@ -1188,6 +1272,52 @@ async function openSkillEditor(skillInput, rootInput) {
   }
 }
 
+function seedBundledCustomContentIfMissing(norm, root, title) {
+  const contentFile = path.join(root, 'content.json');
+  if (fs.existsSync(contentFile)) return;
+  if (norm === 'social-cards') {
+    writeWhole(contentFile, `${JSON.stringify({
+      title: title || '未命名社媒卡片',
+      brandColor: '#E8703A',
+      theme: 'editorial-light',
+      format: 'xhs-3-4',
+      author: '@Orca-Design',
+      seriesTag: '',
+      cards: [
+        {
+          id: 'card-1',
+          layout: 'cover',
+          badge: '01 / 02',
+          title: title || '社媒卡片封面',
+          subtitle: '点击右侧面板或让 Agent 生成结构化图文要点。',
+          points: [],
+          footnote: 'Social Cards',
+        },
+      ],
+    }, null, 2)}\n`);
+  } else if (norm === 'long-page') {
+    writeWhole(contentFile, `${JSON.stringify({
+      title: title || '未命名长页文章',
+      subtitle: '遵循 CJK T1–T10 排版规范：36em 行长、1.7 行距、明暗双主题与单文件离线 HTML 导出。',
+      mode: 'faithful',
+      theme: 'light',
+      brandColor: '#2563EB',
+      author: 'Orca-Design',
+      date: new Date().toISOString().slice(0, 10),
+      lang: 'zh-Hans',
+      sections: [
+        {
+          id: 'sec-1',
+          heading: '一、正文开始',
+          blocks: [
+            { type: 'paragraph', text: '点击这里可直接编辑正文内容，或让 Agent 按忠实精排 / 提炼解读模式写入全文。' },
+          ],
+        },
+      ],
+    }, null, 2)}\n`);
+  }
+}
+
 async function createExample(skillInput, nameInput) {
   const norm = normalizeTypeId(skillInput);
   const base = readState().workspaceRoot || '';
@@ -1203,6 +1333,7 @@ async function createExample(skillInput, nameInput) {
   const rtReady = getRuntimeStatus().state === 'ready';
   if (rtReady && !tpl && norm !== 'page') {
     try {
+      await ensureExtraTypesReady({ hotReload: true });
       const safe = String(nameInput || '').replace(/[^A-Za-z0-9_\u4e00-\u9fa5 -]/g, '').trim().slice(0, 60);
       const designDir = path.join(base, '.design');
       fs.mkdirSync(designDir, { recursive: true });
@@ -1217,13 +1348,31 @@ async function createExample(skillInput, nameInput) {
         folder,
       }, { start: true });
       if (created?.id) {
-        recordOpened(norm, created.root || folder, new Date(), { id: created.id });
-        return { ok: true, root: created.root || folder, id: created.id, view_url: created.view_url };
+        const outRoot = created.root || folder;
+        seedBundledCustomContentIfMissing(norm, outRoot, safe);
+        recordOpened(norm, outRoot, new Date(), { id: created.id });
+        return { ok: true, root: outRoot, id: created.id, view_url: created.view_url };
       }
       if (created?.error) return { ok: false, error: created.error.message || 'Daemon 创建失败' };
     } catch (err) {
       return { ok: false, error: `创建失败: ${err.message}` };
     }
+  }
+
+  if (!tpl && BUNDLED_CUSTOM_TYPES.includes(norm)) {
+    const safe = String(nameInput || '').replace(/[^A-Za-z0-9_\u4e00-\u9fa5 -]/g, '').trim().slice(0, 60);
+    const slugBase = (safe || norm).replace(/[^A-Za-z0-9_-]/g, '-') || norm;
+    const designDir = path.join(base, '.design');
+    let folderName = slugBase;
+    let idx = 2;
+    while (fs.existsSync(path.join(designDir, folderName))) folderName = `${slugBase}-${idx++}`;
+    const root = path.join(designDir, folderName);
+    fs.mkdirSync(root, { recursive: true });
+    const title = safe || (norm === 'social-cards' ? '未命名社媒卡片' : '未命名长页文章');
+    writeWhole(path.join(root, '.artifact.json'), `${JSON.stringify({ type: norm, title }, null, 2)}\n`);
+    seedBundledCustomContentIfMissing(norm, root, title);
+    recordOpened(norm, root);
+    return { ok: true, root };
   }
 
   if (!tpl) {
@@ -1476,7 +1625,81 @@ const GALLERY_STR = {
     "columnFilter": "专栏归属",
     "colAll": "全部",
     "colGrouped": "已归入专栏",
-    "colUngrouped": "未归组"
+    "colUngrouped": "未归组",
+    "selfBuiltBadge": "自研",
+    "cardsMeta": "{count} 张卡片",
+    "sectionsMeta": "{count} 章节",
+    "humanizeBtn": "去 AI 味",
+    "voiceBtn": "语气档案",
+    "humanizeTitle": "去 AI 味润色（Humanizer-zh · MIT）",
+    "humanizeDesc": "依据 MIT 协议 op7418/Humanizer-zh 的 31 条中文检查点去除模板化表达，严格保留事实、数字与不确定程度。",
+    "humanizeSourceLabel": "待润色内容来源",
+    "humanizeSourcePaste": "粘贴正文文本",
+    "humanizeSourceFile": "选择工作区文档（.md / .txt）",
+    "humanizeModeLabel": "处理模式",
+    "humanizeModeRewrite": "直接输出改写终稿",
+    "humanizeModeReview": "仅审阅给修改建议（不改文件）",
+    "humanizeUseVoice": "结合我的语气档案保留个人风格",
+    "humanizeVoiceNotice": "将参考你的本机语气档案对齐文风；已约束模型仅学表达习惯，绝不把过往文章中的经历或数据写入当前作品。",
+    "humanizeNoVoiceHint": "（尚未建立语气档案，可先在「语气档案」工作台建档）",
+    "humanizeInputLabel": "粘贴正文文本",
+    "humanizeInputPlaceholder": "粘贴需要去 AI 味润色的中文段落或文章…",
+    "humanizeSelectFile": "选择工作区文本文件",
+    "humanizeNoDocs": "当前工作区未发现 .md / .txt 文档",
+    "humanizeLaunch": "🚀 启动 Agent 润色",
+    "humanizeStarted": "✓ 已拉起 Agent 会话执行去 AI 味润色",
+    "humanizeCopiedFallback": "未能直接拉起 Agent，去 AI 味提示词已复制到剪贴板，请直接粘贴发送",
+    "humanizeFailed": "启动润色失败: ",
+    "voiceTitle": "个人语气档案工作台（MIT 自研）",
+    "voicePrivacyHint": "隐私边界：档案与临时语料仅存放在本机受控目录（0600 权限），绝不联网上传；支持随时一键物理彻底清空。",
+    "voiceStatusReady": "已建档 · 更新于 {time} · {bytes} 字节 · {samples} 份临时样本",
+    "voiceStatusEmpty": "尚未建档：可粘贴文章片段、选择本地 .md 文件或从对话筛选用户发言来学习建档。",
+    "voiceEditTab": "查看与编辑档案",
+    "voiceLearnTab": "学习建档",
+    "voicePreviewMode": "渲染预览",
+    "voiceEditRaw": "编辑源码",
+    "voiceLoadTemplate": "填入参考模板",
+    "voiceSaveBtn": "保存档案",
+    "voiceSaved": "✓ 语气档案已保存（0600 权限）",
+    "voiceSaveFailed": "保存语气档案失败: ",
+    "voiceLearnPasteLabel": "方式 A：粘贴自己写过的文章段落或选择本地 .md/.txt 文档",
+    "voiceLearnPastePlaceholder": "粘贴 2–5 段你平时真实写过的文字（如随笔、周报、帖子）…",
+    "voiceLearnFileLabel": "可选：附加工作区本地文档作为学习样本",
+    "voiceLearnNoFile": "不附加工作区文件",
+    "voiceLearnBtn": "🚀 交给 Agent 学习建档",
+    "voiceLearnStarted": "✓ 已拉起 Agent 学习你的语气特征并生成档案",
+    "voiceLearnCopiedFallback": "未能直接拉起 Agent，建档提示词已复制到剪贴板",
+    "voiceLearnFailed": "启动建档失败: ",
+    "voiceScanTitle": "方式 B：从本机 Orca 历史对话补充（需明确确认）",
+    "voiceScanDesc": "仅在点击下方按钮后按需扫描，绝不后台静默读取；自动排除代码/URL/助手回复，仅展示 ≥60 字自然语言供逐条勾选。",
+    "voiceScanBtn": "从我的对话补充",
+    "voiceScanning": "正在扫描近期对话…",
+    "voiceScanConfirmBtn": "确认将已勾选项交给 Agent 分析",
+    "voiceScanDegraded": "未能从本地对话提取足够样本（{msg}），请使用上方粘贴文本或选择本地 .md 文件。",
+    "voiceScanFound": "已筛选出 {count} 条用户自然语言发言，请勾选后点击确认：",
+    "voicePurgeBtn": "清空档案与语料",
+    "voicePurgeConfirmTitle": "彻底清空语气档案与语料？",
+    "voicePurgeConfirmDesc": "将物理删除本机 voice-profile.md 及所有临时样本文件并恢复空态，无法撤销。",
+    "voicePurgeConfirmBtn": "确认物理清空",
+    "voicePurged": "✓ 已物理清空语气档案与全部临时语料",
+    "voicePurgeFailed": "清空失败: ",
+    "nextIssueUseVoice": "附加我的语气档案",
+    "nextIssueHumanize": "创作前先去 AI 味润色素材",
+    "exportArtifact": "离线导出",
+    "exportDialogTitle": "离线导出 · {title}",
+    "exportPresetLabel": "导出画幅预设",
+    "exportSchemeLabel": "导出明暗主题",
+    "exportSchemeLight": "亮色主题",
+    "exportSchemeDark": "暗色主题",
+    "exportCardsZipBtn": "导出 2x 高清组图 (PNG / ZIP)",
+    "exportLongPngBtn": "导出移动端长图 (PNG)",
+    "exportPdfBtn": "导出分页 PDF",
+    "exportHtmlBtn": "导出单文件离线 HTML",
+    "exporting": "正在渲染导出…",
+    "exportSuccess": "✓ 已导出 {filename}（{bytes}）",
+    "exportFailed": "导出失败: ",
+    "exportBrowserMissingTitle": "未检测到本地 Chromium 浏览器",
+    "recipesUseVoice": "结合我的语气档案"
   },
   "en": {
     "works": "Projects",
@@ -1697,7 +1920,81 @@ const GALLERY_STR = {
     "columnFilter": "Column",
     "colAll": "All",
     "colGrouped": "In a column",
-    "colUngrouped": "Ungrouped"
+    "colUngrouped": "Ungrouped",
+    "selfBuiltBadge": "Built-in",
+    "cardsMeta": "{count} cards",
+    "sectionsMeta": "{count} sections",
+    "humanizeBtn": "Humanize",
+    "voiceBtn": "Voice Profile",
+    "humanizeTitle": "De-AI Polish (Humanizer-zh · MIT)",
+    "humanizeDesc": "Refine Chinese prose using MIT op7418/Humanizer-zh (31 checkpoints) while strictly preserving facts, numbers, and certainty.",
+    "humanizeSourceLabel": "Source",
+    "humanizeSourcePaste": "Paste text",
+    "humanizeSourceFile": "Pick workspace doc (.md / .txt)",
+    "humanizeModeLabel": "Mode",
+    "humanizeModeRewrite": "Output polished final text",
+    "humanizeModeReview": "Review & suggest edits only (no file write)",
+    "humanizeUseVoice": "Align with my Voice Profile",
+    "humanizeVoiceNotice": "Your local Voice Profile will guide phrasing style only; the model is instructed never to copy past facts or experiences into this draft.",
+    "humanizeNoVoiceHint": "(No Voice Profile yet — create one in Voice Profile workbench first)",
+    "humanizeInputLabel": "Text to polish",
+    "humanizeInputPlaceholder": "Paste Chinese paragraphs or an article draft to polish…",
+    "humanizeSelectFile": "Select workspace document",
+    "humanizeNoDocs": "No .md / .txt files found in current workspace",
+    "humanizeLaunch": "🚀 Launch Agent to Polish",
+    "humanizeStarted": "✓ Launched Agent chat for Humanizer-zh polish",
+    "humanizeCopiedFallback": "Could not launch Agent directly; polish prompt copied to clipboard",
+    "humanizeFailed": "Failed to start polish: ",
+    "voiceTitle": "Voice Profile Workbench (MIT Self-Built)",
+    "voicePrivacyHint": "Privacy: Your profile and samples stay strictly local (0600 permissions), never uploaded. You can permanently purge all files anytime.",
+    "voiceStatusReady": "Active · Updated {time} · {bytes} bytes · {samples} temp samples",
+    "voiceStatusEmpty": "Empty: Paste sample paragraphs, pick local .md files, or scan your chat messages to build a profile.",
+    "voiceEditTab": "View & Edit Profile",
+    "voiceLearnTab": "Learn from Samples",
+    "voicePreviewMode": "Preview",
+    "voiceEditRaw": "Edit Markdown",
+    "voiceLoadTemplate": "Load template",
+    "voiceSaveBtn": "Save profile",
+    "voiceSaved": "✓ Voice profile saved (0600)",
+    "voiceSaveFailed": "Failed to save profile: ",
+    "voiceLearnPasteLabel": "Option A: Paste your own writing samples or pick a local .md/.txt file",
+    "voiceLearnPastePlaceholder": "Paste 2–5 paragraphs written in your natural voice…",
+    "voiceLearnFileLabel": "Optional: attach a workspace document as sample",
+    "voiceLearnNoFile": "No workspace file attached",
+    "voiceLearnBtn": "🚀 Ask Agent to Learn Profile",
+    "voiceLearnStarted": "✓ Launched Agent to analyze your samples",
+    "voiceLearnCopiedFallback": "Could not launch Agent directly; learning prompt copied to clipboard",
+    "voiceLearnFailed": "Failed to start learning: ",
+    "voiceScanTitle": "Option B: Supplement from local Orca chats (explicit opt-in)",
+    "voiceScanDesc": "Runs only when clicked (never silently). Strips code/URLs/assistant messages and previews >=60-char user paragraphs for your selection.",
+    "voiceScanBtn": "Scan my chats",
+    "voiceScanning": "Scanning recent sessions…",
+    "voiceScanConfirmBtn": "Confirm selected snippets for Agent",
+    "voiceScanDegraded": "Could not extract enough chat snippets ({msg}). Please paste text or pick a local .md file above.",
+    "voiceScanFound": "Found {count} natural-language user snippets. Select items to include:",
+    "voicePurgeBtn": "Purge profile & samples",
+    "voicePurgeConfirmTitle": "Permanently purge Voice Profile & samples?",
+    "voicePurgeConfirmDesc": "Physically deletes voice-profile.md and all temporary sample files and resets to empty state. Cannot be undone.",
+    "voicePurgeConfirmBtn": "Confirm permanent purge",
+    "voicePurged": "✓ Permanently purged voice profile and samples",
+    "voicePurgeFailed": "Purge failed: ",
+    "nextIssueUseVoice": "Attach my Voice Profile",
+    "nextIssueHumanize": "Humanize source material before drafting",
+    "exportArtifact": "Offline Export",
+    "exportDialogTitle": "Offline Export · {title}",
+    "exportPresetLabel": "Card aspect preset",
+    "exportSchemeLabel": "Color scheme",
+    "exportSchemeLight": "Light",
+    "exportSchemeDark": "Dark",
+    "exportCardsZipBtn": "Export 2x Cards (PNG / ZIP)",
+    "exportLongPngBtn": "Export Long Mobile PNG",
+    "exportPdfBtn": "Export Paginated PDF",
+    "exportHtmlBtn": "Export Standalone HTML",
+    "exporting": "Rendering export…",
+    "exportSuccess": "✓ Exported {filename} ({bytes})",
+    "exportFailed": "Export failed: ",
+    "exportBrowserMissingTitle": "Local Chromium browser not found",
+    "recipesUseVoice": "Use my Voice Profile"
   }
 };
 
@@ -1709,17 +2006,11 @@ for (const skill of SKILLS) {
   GALLERY_STR.en['skill.' + skill.id + '.about'] = skill.aboutEn;
   GALLERY_STR.en['skill.' + skill.id + '.prompt'] = skill.promptEn;
 }
-for (const [index, recipe] of RECIPES.entries()) {
-  const [title, desc] = [
-    ["Design system → Unified projects", "Build a design system, then create slides with its tokens."],
-    ["Canvas concepts → Motion demo", "Explore canvas concepts, choose one, then animate it."],
-    ["Data → Dashboard → Report", "Build a data dashboard, then create a presentation."],
-    ["Canvas exploration → Design system", "Explore visual directions, then capture a reusable design system."],
-  ][index];
+for (const recipe of RECIPES) {
   GALLERY_STR.zh['recipe.' + recipe.id + '.title'] = recipe.title;
   GALLERY_STR.zh['recipe.' + recipe.id + '.desc'] = recipe.desc;
-  GALLERY_STR.en['recipe.' + recipe.id + '.title'] = title;
-  GALLERY_STR.en['recipe.' + recipe.id + '.desc'] = desc;
+  GALLERY_STR.en['recipe.' + recipe.id + '.title'] = recipe.titleEn || recipe.title;
+  GALLERY_STR.en['recipe.' + recipe.id + '.desc'] = recipe.descEn || recipe.desc;
 }
 const EXAMPLE_EN = {
   "design": [
@@ -1934,6 +2225,13 @@ html[data-scheme=light] { color-scheme: light; }
 .bda-field-label { display: block; font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary); margin: 0 0 6px; }
 .bda-dialog select, .bda-dialog textarea, .bda-dialog input[type=number] { width: 100%; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; outline: none; margin-bottom: 12px; }
 .bda-dialog textarea { min-height: 84px; resize: vertical; }
+.bda-tile-badge { position: absolute; right: 7px; top: 7px; font-size: 10px; line-height: 15px; padding: 1px 6px; border-radius: 999px; background: color-mix(in srgb, var(--bda-tint) 22%, var(--dsw-alias-bg-base)); color: var(--dsw-alias-label-primary); font-weight: 500; }
+.bda-notice { padding: 10px 12px; border-radius: 10px; border: .5px solid var(--dsw-alias-border-l2); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-base)); font-size: 12px; line-height: 1.55; color: var(--dsw-alias-label-secondary); margin-bottom: 12px; }
+.bda-notice.is-warn { border-color: var(--dsw-alias-state-warn-primary); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, var(--dsw-alias-bg-base)); }
+.bda-tabs { display: flex; gap: 6px; margin-bottom: 12px; border-bottom: .5px solid var(--dsw-alias-border-l2); padding-bottom: 8px; }
+.bda-snip-list { max-height: 180px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 6px; margin: 8px 0 12px; display: flex; flex-direction: column; gap: 6px; }
+.bda-snip-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--dsw-alias-bg-skeleton); font-size: 12px; line-height: 1.45; cursor: pointer; }
+.bda-md-preview { max-height: 240px; overflow: auto; padding: 10px 12px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; font-size: 13px; line-height: 1.65; white-space: pre-wrap; margin-bottom: 12px; background: var(--dsw-alias-bg-skeleton); }
 .hidden { display: none !important; }
 </style>
 </head>
@@ -1948,6 +2246,8 @@ html[data-scheme=light] { color-scheme: light; }
           <span class="bda-ws" id="wsLabel"></span>
         </div>
         <div class="bda-tools">
+          <button type="button" class="bda-btn" id="humanizeBtn" data-i18n="humanizeBtn">${text('humanizeBtn')}</button>
+          <button type="button" class="bda-btn" id="voiceBtn" data-i18n="voiceBtn">${text('voiceBtn')}</button>
           <button type="button" class="bda-btn" id="typesBtn" data-i18n="typesBtn">${text('typesBtn')}</button>
           <button type="button" class="bda-btn" id="languageBtn" data-i18n-title="language" title="${text('language')}">${text('languageButton')}</button>
           <div class="bda-search">
@@ -1996,6 +2296,7 @@ html[data-scheme=light] { color-scheme: light; }
   <div class="editor-bar">
     <button class="bda-btn" id="backBtn" data-i18n="back">${text('back')}</button>
     <span class="title" id="editorTitle"></span>
+    <button class="bda-btn hidden" id="editorExportBtn" data-i18n="exportArtifact">${text('exportArtifact')}</button>
     <button class="bda-btn" id="popBtn" data-i18n="popOut">${text('popOut')}</button>
   </div>
   <div id="l1Banner" class="l1-banner hidden">
@@ -2102,6 +2403,10 @@ function typeIconSvg(skill, size = 18) {
       inner = '<rect x="2.75" y="4" width="14.5" height="12" rx="2" ' + p + '/><path d="m8.5 7.75 4 2.25-4 2.25v-4.5Z" ' + p + '/>'; break;
     case 'page':
       inner = '<rect x="2.75" y="3.5" width="14.5" height="13" rx="2" ' + p + '/><path d="M2.75 7.25h14.5M8.5 11l-2 2 2 2M11.5 11l2 2-2 2" ' + p + '/>'; break;
+    case 'social-cards':
+      inner = '<rect x="3" y="3.5" width="9.5" height="12.5" rx="1.75" ' + p + '/><path d="M14.5 5.5v9.5a1.5 1.5 0 0 1-1.5 1.5H7.5M5.5 7.5h4.5M5.5 10.5h3" ' + p + '/>'; break;
+    case 'long-page':
+      inner = '<rect x="4" y="2.75" width="12" height="14.5" rx="1.75" ' + p + '/><path d="M7 6.5h6M7 9.5h6M7 12.5h4" ' + p + '/>'; break;
     default:
       inner = '<polygon points="10,2.5 16.5,6.5 16.5,13.5 10,17.5 3.5,13.5 3.5,6.5" ' + p + '/>';
   }
@@ -2119,6 +2424,8 @@ function drawnHtml(skill, title) {
     case 'sheets': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-kpis"><span class="bda-kpi"></span><span class="bda-kpi"></span><span class="bda-kpi"></span></div></div>';
     case 'whiteboard': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-boards"><div class="bda-board"></div><div class="bda-board"></div></div></div>';
     case 'docs': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-line" style="width:72%"></div></div>';
+    case 'social-cards': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-boards"><div class="bda-board"></div><div class="bda-board"></div><div class="bda-board"></div></div></div>';
+    case 'long-page': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-line" style="width:86%"></div></div>';
     default: return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-line"></div></div>';
   }
 }
@@ -2143,7 +2450,7 @@ function ago(iso) {
 
 function localizedMeta(item) {
   const match = /^(\\d+) /.exec(item.meta || '');
-  const keys = { design: 'boards', slides: 'pages', motion: 'scenes', 'design-system': 'components', data: 'sheets', whiteboard: 'elements', sheets: 'worksheets', docs: 'tabs' };
+  const keys = { design: 'boards', slides: 'pages', motion: 'scenes', 'design-system': 'components', data: 'sheets', whiteboard: 'elements', sheets: 'worksheets', docs: 'tabs', 'social-cards': 'cardsMeta', 'long-page': 'sectionsMeta' };
   if (match && keys[item.skill]) return t(keys[item.skill], {count: match[1]});
   if (item.skill === 'data' && item.meta) return t('dashboard');
   if (item.skill === 'whiteboard' && item.meta) return t('whiteboard');
@@ -2156,6 +2463,7 @@ let state = {
   columns: [],
   types: [],
   runtime: null,
+  voiceExists: false,
   loadedOnce: false,
   workspaceName: '',
   workspaceRoot: '',
@@ -2169,6 +2477,7 @@ let state = {
 
 let embeddedView = null;
 let pendingWaitItem = null;
+let currentOpenItem = null;
 
 async function copyText(text) {
   if (!text) return false;
@@ -2290,13 +2599,19 @@ function isFilterActive() {
 function renderTiles() {
   const customEnabled = (state.types || []).filter(tp => !tp.builtin && tp.enabled !== false);
   const allTiles = [
-    ...SKILLS_CONFIG.map(s => ({ id: s.id, name: skillText(s.id, 'name'), tint: s.tint })),
-    ...customEnabled.map(c => ({ id: c.id, name: c.name || c.title || c.id, tint: c.tint || '#6366f1' })),
+    ...SKILLS_CONFIG.map(s => ({ id: s.id, name: skillText(s.id, 'name'), tint: s.tint, selfBuilt: false })),
+    ...customEnabled.map(c => ({
+      id: c.id,
+      name: (lang === 'en' && c.nameEn) ? c.nameEn : (c.name || c.title || c.id),
+      tint: c.tint || (c.id === 'social-cards' ? '#e8703a' : (c.id === 'long-page' ? '#2563eb' : '#6366f1')),
+      selfBuilt: Boolean(c.selfBuilt || c.scope === 'extra'),
+    })),
   ];
   document.getElementById('tiles').innerHTML = allTiles.map(s =>
     '<li style="--bda-tint:' + esc(s.tint) + '">' +
     '<button type="button" class="bda-tile" data-skill="' + esc(s.id) + '">' +
     '<span class="bda-tile-art"><svg class="bda-tile-squiggle" viewBox="0 0 140 100" preserveAspectRatio="xMidYMid slice" fill="none" stroke="currentColor" stroke-width="1.1" stroke-dasharray="0 3.2" stroke-linecap="round"><path d="M4 84C20 16 42 98 62 42s38 58 74-28"/><path d="M6 88C24 22 44 104 66 46s36 56 72-26"/></svg>' +
+    (s.selfBuilt ? ('<span class="bda-tile-badge">' + esc(t('selfBuiltBadge')) + '</span>') : '') +
     typeIconSvg(s.id, 34) + '</span>' +
     '<span class="bda-tile-label">' + esc(s.name) + '</span>' +
     '</button></li>'
@@ -2577,10 +2892,17 @@ async function openItem(item) {
       return;
     }
     pendingWaitItem = null;
+    currentOpenItem = item;
+    const exportBtn = document.getElementById('editorExportBtn');
+    if (exportBtn) {
+      const exportable = item.skill === 'social-cards' || item.skill === 'long-page';
+      exportBtn.classList.toggle('hidden', !exportable);
+      exportBtn.onclick = exportable ? () => openExportDialog(item) : null;
+    }
     const frame = document.getElementById('frame');
     document.getElementById('runtimeWait').classList.add('hidden');
     frame.classList.remove('hidden');
-    document.getElementById('editorTitle').textContent = item.title + ' · ' + (SKILL_MAP[item.skill] ? skillText(item.skill, 'name') : item.skill);
+    document.getElementById('editorTitle').textContent = item.title + ' · ' + (SKILL_MAP[item.skill] ? skillText(item.skill, 'name') : (item.typeTitle || item.skill));
     if (embeddedView) { embeddedView.destroy(); embeddedView = null; }
     if (res.embedMode === 'shell') {
       document.getElementById('l1Banner').classList.remove('hidden');
@@ -2622,6 +2944,8 @@ async function openItem(item) {
 
 function backToGallery() {
   pendingWaitItem = null;
+  currentOpenItem = null;
+  document.getElementById('editorExportBtn')?.classList.add('hidden');
   if (embeddedView) { embeddedView.destroy(); embeddedView = null; }
   document.getElementById('editorView').classList.add('hidden');
   document.getElementById('listView').classList.remove('hidden');
@@ -2705,10 +3029,12 @@ function showActionsMenu(item, anchorEl) {
   const layer = document.getElementById('menuLayer');
   anchorEl.closest('.bda-item')?.setAttribute('data-menu', 'true');
   const col = item.seriesId ? state.columns.find(c => c.seriesId === item.seriesId) : null;
+  const isExportable = item.skill === 'social-cards' || item.skill === 'long-page';
   layer.innerHTML = '<div class="bda-menu" style="left:' + Math.min(rect.left, window.innerWidth - 220) + 'px;top:' + (rect.bottom + 6) + 'px">' +
     '<button type="button" class="bda-menu-item" data-menu-action="pin">' + SVG_ICONS.pin + '<span class="bda-menu-label">' + (item.pinned ? t('unpin') : t('pin')) + '</span><kbd class="bda-menu-key">P</kbd></button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="rename">' + SVG_ICONS.rename + '<span class="bda-menu-label">' + t('rename') + '</span><kbd class="bda-menu-key">R</kbd></button>' +
     '<button type="button" class="bda-menu-item" data-menu-action="recreate">' + SVG_ICONS.info + '<span class="bda-menu-label">' + t('recreate') + '</span><kbd class="bda-menu-key">S</kbd></button>' +
+    (isExportable ? ('<button type="button" class="bda-menu-item" data-menu-action="exportArtifact"><span class="bda-menu-label">' + esc(t('exportArtifact')) + '</span></button>') : '') +
     '<div class="bda-menu-rule"></div>' +
     (col ? ('<button type="button" class="bda-menu-item" data-menu-action="nextIssueFromThis"><span class="bda-menu-label">' + esc(t('nextIssueFromThis')) + '</span></button>') : '') +
     '<button type="button" class="bda-menu-item" data-menu-action="assignColumn"><span class="bda-menu-label">' + esc(item.seriesId ? t('moveToColumn') : t('assignToColumn')) + '</span></button>' +
@@ -2740,6 +3066,8 @@ function showActionsMenu(item, anchorEl) {
       const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, skill: item.skill, title: item.title }) });
       if (res.ok) showToast(t('remixSent', {outcome: res.outcome || 'chat'}));
       else { const copied = await copyText(res.starter || ''); if (copied) showToast(t('draftCopied') + (res.error || '')); else showToast(t('remixFailed') + (res.error || '')); }
+    } else if (act === 'exportArtifact') {
+      openExportDialog(item);
     } else if (act === 'forget') {
       const res = await api('/api/forget', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
       showToast(res.ok ? t('forgotten') : t('forgetFailed') + (res.error || ''));
@@ -2961,7 +3289,10 @@ function openNextIssueDialog(col, preferredRefRoot = '') {
     '<select id="niTypeSelect">' +
     typeOpts.map(o => '<option value="' + esc(o.id) + '"' + (defaultType === o.id ? ' selected' : '') + '>' + esc(o.name) + '</option>').join('') +
     '</select>' +
-    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer"><input type="checkbox" id="niInheritChk" checked><span>' + esc(t('inheritStyleLabel')) + '</span></label>' +
+    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="niInheritChk" checked><span>' + esc(t('inheritStyleLabel')) + '</span></label>' +
+    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="niUseVoiceChk"' + (state.voiceExists ? '' : ' disabled') + '><span>' + esc(t('nextIssueUseVoice')) + (state.voiceExists ? '' : ' ' + esc(t('humanizeNoVoiceHint'))) + '</span></label>' +
+    '<div id="niVoiceNotice" class="bda-notice hidden">' + esc(t('humanizeVoiceNotice')) + '</div>' +
+    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer"><input type="checkbox" id="niHumanizeChk"><span>' + esc(t('nextIssueHumanize')) + '</span></label>' +
     '<label class="bda-field-label" for="niTopicInput">' + esc(t('nextIssueTopicLabel')) + '</label>' +
     '<textarea id="niTopicInput" placeholder="' + esc(t('nextIssueTopicPlaceholder')) + '"></textarea>' +
     '<div class="bda-dialog-actions">' +
@@ -2969,6 +3300,11 @@ function openNextIssueDialog(col, preferredRefRoot = '') {
     '<button type="button" class="bda-btn" data-primary="true" id="niLaunchBtn">' + esc(t('launchNextIssue')) + '</button></div>'
   );
 
+  const voiceChk = document.getElementById('niUseVoiceChk');
+  const voiceNotice = document.getElementById('niVoiceNotice');
+  if (voiceChk && voiceNotice) {
+    voiceChk.onchange = () => voiceNotice.classList.toggle('hidden', !voiceChk.checked);
+  }
   const topicEl = document.getElementById('niTopicInput');
   topicEl.focus();
   document.getElementById('niCancel').onclick = closeDialog;
@@ -2979,12 +3315,14 @@ function openNextIssueDialog(col, preferredRefRoot = '') {
     const referenceRoot = document.getElementById('niRefSelect').value;
     const skill = document.getElementById('niTypeSelect').value;
     const inheritStyle = document.getElementById('niInheritChk').checked;
+    const useVoice = Boolean(document.getElementById('niUseVoiceChk')?.checked);
+    const humanizeFirst = Boolean(document.getElementById('niHumanizeChk')?.checked);
     const topic = topicEl.value.trim();
     try {
       const res = await api('/api/start', {
         method: 'POST',
         headers: {'content-type':'application/json'},
-        body: JSON.stringify({ action: 'next-issue', seriesId: col.seriesId, referenceRoot, skill, inheritStyle, topic }),
+        body: JSON.stringify({ action: 'next-issue', seriesId: col.seriesId, referenceRoot, skill, inheritStyle, useVoice, humanizeFirst, topic }),
       });
       closeDialog();
       if (res.ok) {
@@ -3073,9 +3411,9 @@ function openCreateDialog(skillId) {
 function showCreateModalInner(skillId) {
   const s = SKILL_MAP[skillId] || (state.types || []).find(tp => tp.id === skillId);
   if (!s) return;
-  const titleName = SKILL_MAP[skillId] ? skillText(skillId, 'name') : (s.name || s.title || skillId);
-  const aboutText = SKILL_MAP[skillId] ? skillText(skillId, 'about') : (s.description || '');
-  const promptText = SKILL_MAP[skillId] ? skillText(skillId, 'prompt') : ('/open-artifact ' + skillId + ' ');
+  const titleName = SKILL_MAP[skillId] ? skillText(skillId, 'name') : ((lang === 'en' && s.nameEn) ? s.nameEn : (s.name || s.title || skillId));
+  const aboutText = SKILL_MAP[skillId] ? skillText(skillId, 'about') : ((lang === 'en' && s.descriptionEn) ? s.descriptionEn : (s.description || ''));
+  const promptText = SKILL_MAP[skillId] ? skillText(skillId, 'prompt') : ((s.templates?.[0]?.prompt) || ('/open-artifact ' + skillId + ' '));
   const canBlank = Boolean(s.blankCreatable || EXAMPLE_TEMPLATES[skillId]);
 
   openDialog(
@@ -3162,6 +3500,283 @@ async function openTypesManager() {
   };
 }
 
+async function openHumanizeDialog() {
+  const [voiceRes, docsRes] = await Promise.all([
+    api('/api/voice').catch(() => ({ exists: false })),
+    api('/api/voice/workspace-docs').catch(() => ({ docs: [] })),
+  ]);
+  state.voiceExists = Boolean(voiceRes?.exists);
+  const docs = Array.isArray(docsRes?.docs) ? docsRes.docs : [];
+  openDialog(
+    '<h2>' + esc(t('humanizeTitle')) + '</h2>' +
+    '<p>' + esc(t('humanizeDesc')) + '</p>' +
+    '<label class="bda-field-label">' + esc(t('humanizeSourceLabel')) + '</label>' +
+    '<div style="display:flex;gap:12px;margin-bottom:10px;font-size:13px">' +
+    '<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="humSrc" value="paste" checked> ' + esc(t('humanizeSourcePaste')) + '</label>' +
+    '<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="humSrc" value="file"> ' + esc(t('humanizeSourceFile')) + '</label></div>' +
+    '<div id="humPasteBox"><label class="bda-field-label" for="humTextInput">' + esc(t('humanizeInputLabel')) + '</label>' +
+    '<textarea id="humTextInput" placeholder="' + esc(t('humanizeInputPlaceholder')) + '"></textarea></div>' +
+    '<div id="humFileBox" class="hidden"><label class="bda-field-label" for="humFileSelect">' + esc(t('humanizeSelectFile')) + '</label>' +
+    (docs.length
+      ? ('<select id="humFileSelect">' + docs.map(d => '<option value="' + esc(d.fullPath) + '">' + esc(d.relPath) + '</option>').join('') + '</select>')
+      : ('<p style="font-size:12px">' + esc(t('humanizeNoDocs')) + '</p>')) +
+    '</div>' +
+    '<label class="bda-field-label" for="humModeSelect">' + esc(t('humanizeModeLabel')) + '</label>' +
+    '<select id="humModeSelect"><option value="rewrite">' + esc(t('humanizeModeRewrite')) + '</option><option value="review">' + esc(t('humanizeModeReview')) + '</option></select>' +
+    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="humVoiceChk"' + (state.voiceExists ? '' : ' disabled') + '><span>' + esc(t('humanizeUseVoice')) + (state.voiceExists ? '' : ' ' + esc(t('humanizeNoVoiceHint'))) + '</span></label>' +
+    '<div id="humVoiceNotice" class="bda-notice hidden">' + esc(t('humanizeVoiceNotice')) + '</div>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="humCancel">' + t('cancel') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="humLaunchBtn">' + esc(t('humanizeLaunch')) + '</button></div>'
+  );
+  document.querySelectorAll('input[name="humSrc"]').forEach(r => {
+    r.onchange = () => {
+      const isFile = r.value === 'file' && r.checked;
+      document.getElementById('humPasteBox').classList.toggle('hidden', isFile);
+      document.getElementById('humFileBox').classList.toggle('hidden', !isFile);
+    };
+  });
+  const humVoiceChk = document.getElementById('humVoiceChk');
+  const humVoiceNotice = document.getElementById('humVoiceNotice');
+  if (humVoiceChk && humVoiceNotice) {
+    humVoiceChk.onchange = () => humVoiceNotice.classList.toggle('hidden', !humVoiceChk.checked);
+  }
+  document.getElementById('humCancel').onclick = closeDialog;
+  document.getElementById('humLaunchBtn').onclick = async () => {
+    const srcMode = document.querySelector('input[name="humSrc"]:checked')?.value || 'paste';
+    const text = srcMode === 'paste' ? document.getElementById('humTextInput').value.trim() : '';
+    const filePath = srcMode === 'file' ? (document.getElementById('humFileSelect')?.value || '') : '';
+    const mode = document.getElementById('humModeSelect').value;
+    const useVoice = Boolean(document.getElementById('humVoiceChk')?.checked);
+    const btn = document.getElementById('humLaunchBtn');
+    btn.disabled = true;
+    btn.textContent = t('launching');
+    try {
+      const res = await api('/api/start', {
+        method: 'POST',
+        headers: {'content-type':'application/json'},
+        body: JSON.stringify({ action: 'humanize', text, filePath, mode, useVoice }),
+      });
+      closeDialog();
+      if (res.ok) showToast(t('humanizeStarted'));
+      else if (res.starter) {
+        const copied = await copyText(res.starter);
+        showToast(copied ? t('humanizeCopiedFallback') : (t('humanizeFailed') + (res.error || '')));
+      } else {
+        showToast(t('humanizeFailed') + (res.error || ''));
+      }
+    } catch (err) {
+      closeDialog();
+      showToast(t('humanizeFailed') + err.message);
+    }
+  };
+}
+
+async function openVoiceWorkbench(activeTab = 'edit') {
+  const [voiceRes, docsRes] = await Promise.all([
+    api('/api/voice').catch(() => ({ ok: false, exists: false, content: '' })),
+    api('/api/voice/workspace-docs').catch(() => ({ docs: [] })),
+  ]);
+  state.voiceExists = Boolean(voiceRes?.exists);
+  const docs = Array.isArray(docsRes?.docs) ? docsRes.docs : [];
+  const statusText = voiceRes.exists
+    ? t('voiceStatusReady', { time: voiceRes.updatedAt ? voiceRes.updatedAt.slice(0, 16).replace('T', ' ') : '-', bytes: voiceRes.sizeBytes || 0, samples: voiceRes.sampleCount || 0 })
+    : t('voiceStatusEmpty');
+  const templateMd = ${JSON.stringify(VOICE_PROFILE_TEMPLATE)};
+  let rawMode = !voiceRes.exists;
+  let scannedCandidates = [];
+
+  openDialog(
+    '<h2>' + esc(t('voiceTitle')) + '</h2>' +
+    '<div class="bda-notice">' + esc(t('voicePrivacyHint')) + '</div>' +
+    '<p style="font-size:12px;margin-bottom:10px">' + esc(statusText) + '</p>' +
+    '<div class="bda-tabs">' +
+    '<button type="button" class="bda-chip-btn" id="vtEditTab" data-active="' + (activeTab === 'edit') + '">' + esc(t('voiceEditTab')) + '</button>' +
+    '<button type="button" class="bda-chip-btn" id="vtLearnTab" data-active="' + (activeTab === 'learn') + '">' + esc(t('voiceLearnTab')) + '</button>' +
+    '<button type="button" class="bda-btn" data-danger="true" id="vPurgeBtn" style="margin-left:auto;height:26px;padding:0 10px;font-size:12px">' + esc(t('voicePurgeBtn')) + '</button>' +
+    '</div>' +
+    '<div id="vpEditPane"' + (activeTab === 'edit' ? '' : ' class="hidden"') + '>' +
+    '<div style="display:flex;gap:8px;margin-bottom:8px">' +
+    '<button type="button" class="bda-chip-btn" id="vToggleRawBtn">' + esc(rawMode ? t('voicePreviewMode') : t('voiceEditRaw')) + '</button>' +
+    '<button type="button" class="bda-chip-btn" id="vTemplateBtn">' + esc(t('voiceLoadTemplate')) + '</button></div>' +
+    '<div id="vPreviewBox" class="bda-md-preview' + (rawMode ? ' hidden' : '') + '">' + esc(voiceRes.content || t('voiceStatusEmpty')) + '</div>' +
+    '<textarea id="vRawTextarea" class="' + (rawMode ? '' : 'hidden') + '" style="min-height:190px;font-family:monospace;font-size:12px">' + esc(voiceRes.content || '') + '</textarea>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="vCloseBtn1">' + t('close') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="vSaveBtn">' + esc(t('voiceSaveBtn')) + '</button></div>' +
+    '</div>' +
+    '<div id="vpLearnPane"' + (activeTab === 'learn' ? '' : ' class="hidden"') + '>' +
+    '<label class="bda-field-label" for="vLearnPaste">' + esc(t('voiceLearnPasteLabel')) + '</label>' +
+    '<textarea id="vLearnPaste" placeholder="' + esc(t('voiceLearnPastePlaceholder')) + '"></textarea>' +
+    '<label class="bda-field-label" for="vLearnFileSelect">' + esc(t('voiceLearnFileLabel')) + '</label>' +
+    '<select id="vLearnFileSelect"><option value="">' + esc(t('voiceLearnNoFile')) + '</option>' +
+    docs.map(d => '<option value="' + esc(d.fullPath) + '">' + esc(d.relPath) + '</option>').join('') + '</select>' +
+    '<div style="border-top:.5px solid var(--dsw-alias-border-l2);padding-top:10px;margin-top:4px">' +
+    '<p style="margin-bottom:6px"><strong>' + esc(t('voiceScanTitle')) + '</strong></p>' +
+    '<p style="font-size:12px;margin-bottom:8px">' + esc(t('voiceScanDesc')) + '</p>' +
+    '<button type="button" class="bda-btn" id="vScanBtn">' + esc(t('voiceScanBtn')) + '</button>' +
+    '<div id="vScanBox" style="margin-top:8px;font-size:12px"></div>' +
+    '</div>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="vCloseBtn2">' + t('close') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="vLearnBtn">' + esc(t('voiceLearnBtn')) + '</button></div>' +
+    '</div>'
+  );
+
+  const switchTab = (tab) => {
+    document.getElementById('vtEditTab').setAttribute('data-active', String(tab === 'edit'));
+    document.getElementById('vtLearnTab').setAttribute('data-active', String(tab === 'learn'));
+    document.getElementById('vpEditPane').classList.toggle('hidden', tab !== 'edit');
+    document.getElementById('vpLearnPane').classList.toggle('hidden', tab !== 'learn');
+  };
+  document.getElementById('vtEditTab').onclick = () => switchTab('edit');
+  document.getElementById('vtLearnTab').onclick = () => switchTab('learn');
+  document.getElementById('vCloseBtn1').onclick = closeDialog;
+  document.getElementById('vCloseBtn2').onclick = closeDialog;
+
+  document.getElementById('vToggleRawBtn').onclick = () => {
+    rawMode = !rawMode;
+    document.getElementById('vToggleRawBtn').textContent = rawMode ? t('voicePreviewMode') : t('voiceEditRaw');
+    document.getElementById('vPreviewBox').textContent = document.getElementById('vRawTextarea').value || t('voiceStatusEmpty');
+    document.getElementById('vPreviewBox').classList.toggle('hidden', rawMode);
+    document.getElementById('vRawTextarea').classList.toggle('hidden', !rawMode);
+  };
+  document.getElementById('vTemplateBtn').onclick = () => {
+    rawMode = true;
+    document.getElementById('vRawTextarea').value = templateMd;
+    document.getElementById('vPreviewBox').classList.add('hidden');
+    document.getElementById('vRawTextarea').classList.remove('hidden');
+    document.getElementById('vToggleRawBtn').textContent = t('voicePreviewMode');
+  };
+  document.getElementById('vSaveBtn').onclick = async () => {
+    const content = document.getElementById('vRawTextarea').value;
+    const res = await api('/api/voice/save', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ content }) });
+    if (res.ok) {
+      state.voiceExists = true;
+      showToast(t('voiceSaved'));
+      openVoiceWorkbench('edit');
+    } else {
+      showToast(t('voiceSaveFailed') + (res.error || ''));
+    }
+  };
+  document.getElementById('vLearnBtn').onclick = async () => {
+    const pastedText = document.getElementById('vLearnPaste').value.trim();
+    const fp = document.getElementById('vLearnFileSelect').value;
+    const filePaths = fp ? [fp] : [];
+    const btn = document.getElementById('vLearnBtn');
+    btn.disabled = true; btn.textContent = t('launching');
+    const res = await api('/api/voice/learn', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ pastedText, filePaths }) });
+    closeDialog();
+    if (res.ok) showToast(t('voiceLearnStarted'));
+    else if (res.starter) { await copyText(res.starter); showToast(t('voiceLearnCopiedFallback')); }
+    else showToast(t('voiceLearnFailed') + (res.error || ''));
+  };
+  document.getElementById('vScanBtn').onclick = async () => {
+    const scanBtn = document.getElementById('vScanBtn');
+    const scanBox = document.getElementById('vScanBox');
+    scanBtn.disabled = true; scanBtn.textContent = t('voiceScanning');
+    const res = await api('/api/voice/scan-sessions', { method: 'POST', headers: {'content-type':'application/json'}, body: '{}' });
+    scanBtn.disabled = false; scanBtn.textContent = t('voiceScanBtn');
+    scannedCandidates = Array.isArray(res.candidates) ? res.candidates : [];
+    if (!scannedCandidates.length) {
+      scanBox.innerHTML = '<div class="bda-notice is-warn">' + esc(t('voiceScanDegraded', { msg: res.message || res.reason || '' })) + '</div>';
+      return;
+    }
+    scanBox.innerHTML = '<div>' + esc(t('voiceScanFound', { count: scannedCandidates.length })) + '</div>' +
+      '<div class="bda-snip-list">' +
+      scannedCandidates.map((c, idx) => '<label class="bda-snip-item"><input type="checkbox" class="v-snip-chk" value="' + idx + '" checked><div><div><strong>' + esc(c.title) + '</strong> (' + c.charCount + ')</div><div>' + esc(c.text.slice(0, 180)) + (c.text.length > 180 ? '…' : '') + '</div></div></label>').join('') +
+      '</div><button type="button" class="bda-btn" data-primary="true" id="vConfirmSnipsBtn">' + esc(t('voiceScanConfirmBtn')) + '</button>';
+    document.getElementById('vConfirmSnipsBtn').onclick = async () => {
+      const checked = [...document.querySelectorAll('.v-snip-chk:checked')].map(el => scannedCandidates[Number(el.value)]?.text).filter(Boolean);
+      if (!checked.length) return;
+      const lr = await api('/api/voice/learn', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ selectedSnippets: checked, pastedText: document.getElementById('vLearnPaste').value.trim(), filePaths: document.getElementById('vLearnFileSelect').value ? [document.getElementById('vLearnFileSelect').value] : [] }) });
+      closeDialog();
+      if (lr.ok) showToast(t('voiceLearnStarted'));
+      else if (lr.starter) { await copyText(lr.starter); showToast(t('voiceLearnCopiedFallback')); }
+      else showToast(t('voiceLearnFailed') + (lr.error || ''));
+    };
+  };
+  document.getElementById('vPurgeBtn').onclick = () => {
+    openDialog(
+      '<h2>' + esc(t('voicePurgeConfirmTitle')) + '</h2>' +
+      '<p>' + esc(t('voicePurgeConfirmDesc')) + '</p>' +
+      '<div class="bda-dialog-actions">' +
+      '<button type="button" class="bda-btn" id="vpCancel">' + t('cancel') + '</button>' +
+      '<button type="button" class="bda-btn" data-danger="true" id="vpConfirm">' + esc(t('voicePurgeConfirmBtn')) + '</button></div>'
+    );
+    document.getElementById('vpCancel').onclick = () => openVoiceWorkbench('edit');
+    document.getElementById('vpConfirm').onclick = async () => {
+      const pr = await api('/api/voice/purge', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ confirm: true }) });
+      if (pr.ok) {
+        state.voiceExists = false;
+        showToast(t('voicePurged'));
+        openVoiceWorkbench('edit');
+      } else {
+        showToast(t('voicePurgeFailed') + (pr.error || ''));
+      }
+    };
+  };
+}
+
+function downloadBase64File(filename, mimeType, base64Data) {
+  const raw = atob(base64Data);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const blob = new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function openExportDialog(item) {
+  const isCards = item.skill === 'social-cards';
+  openDialog(
+    '<h2>' + esc(t('exportDialogTitle', { title: item.title })) + '</h2>' +
+    (isCards ? (
+      '<label class="bda-field-label" for="expPresetSelect">' + esc(t('exportPresetLabel')) + '</label>' +
+      '<select id="expPresetSelect"><option value="xhs-3-4">小红书 3:4 (1080×1440)</option><option value="wechat-21-9">公众号头图 21:9 (900×383)</option><option value="square-1-1">分享方卡 1:1 (1080×1080)</option></select>'
+    ) : '') +
+    '<label class="bda-field-label" for="expSchemeSelect">' + esc(t('exportSchemeLabel')) + '</label>' +
+    '<select id="expSchemeSelect"><option value="light">' + esc(t('exportSchemeLight')) + '</option><option value="dark">' + esc(t('exportSchemeDark')) + '</option></select>' +
+    '<div id="expStatusBox"></div>' +
+    '<div class="bda-dialog-actions">' +
+    (isCards
+      ? '<button type="button" class="bda-btn" data-primary="true" data-exp-fmt="cards-zip">' + esc(t('exportCardsZipBtn')) + '</button>'
+      : ('<button type="button" class="bda-btn" data-exp-fmt="html">' + esc(t('exportHtmlBtn')) + '</button>' +
+         '<button type="button" class="bda-btn" data-exp-fmt="long-png">' + esc(t('exportLongPngBtn')) + '</button>' +
+         '<button type="button" class="bda-btn" data-primary="true" data-exp-fmt="pdf">' + esc(t('exportPdfBtn')) + '</button>')) +
+    '<button type="button" class="bda-btn" id="expClose">' + t('close') + '</button></div>'
+  );
+  document.getElementById('expClose').onclick = closeDialog;
+  document.querySelectorAll('[data-exp-fmt]').forEach(btn => {
+    btn.onclick = async () => {
+      const format = btn.getAttribute('data-exp-fmt');
+      const scheme = document.getElementById('expSchemeSelect').value;
+      const preset = document.getElementById('expPresetSelect')?.value;
+      const box = document.getElementById('expStatusBox');
+      box.innerHTML = '<div class="bda-notice">' + esc(t('exporting')) + '</div>';
+      const res = await api('/api/export-render', {
+        method: 'POST',
+        headers: {'content-type':'application/json'},
+        body: JSON.stringify({ root: item.root, skill: item.skill, format, scheme, ...(preset ? { preset } : {}) }),
+      });
+      if (res.ok && res.dataBase64) {
+        downloadBase64File(res.filename || ('export.' + (res.format || 'bin')), res.mimeType, res.dataBase64);
+        box.innerHTML = '<div class="bda-notice">' + esc(t('exportSuccess', { filename: res.filename || res.format, bytes: (res.bytes || 0) + ' B' })) + '</div>';
+      } else if (res.code === 'browser_missing') {
+        box.innerHTML = '<div class="bda-notice is-warn"><strong>' + esc(t('exportBrowserMissingTitle')) + '</strong><br>' + esc(res.hint || res.error || '') + '<br>' + esc(res.fallback || '') + '</div>';
+      } else {
+        box.innerHTML = '<div class="bda-notice is-warn">' + esc(t('exportFailed') + (res.error || t('unknownError'))) + '</div>';
+      }
+    };
+  });
+}
+
 function showFilterMenu(anchorEl) {
   const rect = anchorEl.getBoundingClientRect();
   const layer = document.getElementById('menuLayer');
@@ -3211,6 +3826,8 @@ function showFilterMenu(anchorEl) {
 }
 
 document.getElementById('tiles').onclick = (e) => { const btn = e.target.closest('.bda-tile'); if (btn?.getAttribute('data-skill')) openCreateDialog(btn.getAttribute('data-skill')); };
+document.getElementById('humanizeBtn').onclick = openHumanizeDialog;
+document.getElementById('voiceBtn').onclick = openVoiceWorkbench;
 document.getElementById('typesBtn').onclick = openTypesManager;
 document.getElementById('examples').onclick = async (e) => {
   const btn = e.target.closest('[data-example]'); if (!btn) return;
@@ -3299,6 +3916,7 @@ async function reload() {
       state.columns = res.columns || [];
       state.types = res.types || [];
       state.runtime = res.runtime || state.runtime;
+      state.voiceExists = Boolean(res.voice?.exists);
       state.workspaceName = res.workspaceName || '';
       state.workspaceRoot = res.workspaceRoot || '';
       document.getElementById('wsLabel').textContent = state.workspaceName ? t('workspace') + state.workspaceName : '';
@@ -3384,7 +4002,86 @@ function cleanAgentId(v) {
   return String(v || 'claude').replace(/[^a-z0-9-]/gi, '').slice(0, 32) || 'claude';
 }
 
-function buildNextIssueStarter({ column, issueNumber, folderPath, refItem, skillId, skillMeta, customType, topic, inheritStyle }) {
+function humanizerSkillPath() {
+  return path.join(pluginRoot, 'vendor', 'humanizer-zh', 'SKILL.md');
+}
+
+function readVoicePromptBlock() {
+  const status = readVoiceStatus();
+  if (!status.exists || !status.content.trim()) return '';
+  return [
+    '个人语气档案参考（仅借鉴句长、用词与标点习惯；严禁将过往样本中的经历、数据或观点写入当前作品）：',
+    status.content.slice(0, 6000),
+  ].join('\n');
+}
+
+function readInheritedCustomPreset(refRoot, skillId) {
+  if (!refRoot || (skillId !== 'social-cards' && skillId !== 'long-page')) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(refRoot, 'content.json'), 'utf8'));
+    if (!data || typeof data !== 'object') return null;
+    return {
+      theme: typeof data.theme === 'string' ? data.theme : '',
+      brandColor: typeof data.brandColor === 'string' ? data.brandColor : '',
+      format: typeof data.format === 'string' ? data.format : '',
+      mode: typeof data.mode === 'string' ? data.mode : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildHumanizeStarter({ text, filePath, mode, useVoice }) {
+  const isReview = mode === 'review';
+  const lines = [
+    `请严格按照本插件内置的 MIT 协议规范 ${humanizerSkillPath()}（op7418/Humanizer-zh）执行中文去 AI 味润色。`,
+    '核心保真约束：绝不编造原文未提供的事实、数字、日期或经历；保留否定、比较对象、条件范围与不确定程度；保持代码块、URL 与文件路径原样。',
+    isReview
+      ? '输出模式：仅审阅并逐条给出具体修改建议，绝不直接改写磁盘文件。'
+      : '输出模式：直接交付自然流畅的改写终稿（无需多余开场白或自评分）。',
+  ];
+  if (useVoice) {
+    const voiceBlock = readVoicePromptBlock();
+    if (voiceBlock) lines.push(voiceBlock);
+  }
+  if (filePath) {
+    lines.push(`待润色文档路径：${filePath}`);
+  } else {
+    lines.push(`待润色原文：\n${String(text || '').trim()}`);
+  }
+  return lines.join('\n\n');
+}
+
+function buildVoiceLearnStarter({ sampleFiles, inlineSamples, profileFilePath }) {
+  const lines = [
+    '请根据下面提供的作者真实写作样本，提炼个人语气档案并写入以下本机受控路径（如已存在请合并保留用户既有偏好，勿覆盖无冲突条目）：',
+    `目标档案文件：${profileFilePath}`,
+    '格式要求：必须使用以下 5 个固定二级标题，且每条风格判断都必须附带原文短句佐证，严禁凭空编造人设或性格标签：',
+    '1. `## 句长与段落节奏`\n2. `## 常用表达与连接习惯`\n3. `## 明确回避的套话`\n4. `## 标点与人称偏好`\n5. `## 样本证据摘录`',
+  ];
+  if (Array.isArray(sampleFiles) && sampleFiles.length) {
+    lines.push(`样本文件路径：\n${sampleFiles.map((p) => `- ${p}`).join('\n')}`);
+  }
+  if (Array.isArray(inlineSamples) && inlineSamples.length) {
+    lines.push(`用户精选样本片段：\n${inlineSamples.map((s, i) => `【样本 ${i + 1}】\n${s}`).join('\n\n')}`);
+  }
+  return lines.join('\n\n');
+}
+
+function buildNextIssueStarter({
+  column,
+  issueNumber,
+  folderPath,
+  refItem,
+  skillId,
+  skillMeta,
+  customType,
+  topic,
+  inheritStyle,
+  useVoice,
+  humanizeFirst,
+  inheritedPreset,
+}) {
   const typeName = skillMeta ? skillMeta.name : (customType?.name || skillId);
   const lines = [
     `请为专栏「${column.name}」创作第 #${issueNumber} 期（${typeName} / ${skillId}）。`,
@@ -3397,6 +4094,14 @@ function buildNextIssueStarter({ column, issueNumber, folderPath, refItem, skill
     lines.push(`参考期作品路径：${refItem.root}${refItem.title ? `（标题：${refItem.title}）` : ''}`);
     if (inheritStyle !== false) {
       lines.push(`风格继承要求：请先查看参考期作品 ${refItem.root} 的视觉主题、配色、字体排版与版式结构，沿用同一套设计语言，仅替换为本期新内容。`);
+      if (inheritedPreset) {
+        const parts = [];
+        if (inheritedPreset.theme) parts.push(`theme=${inheritedPreset.theme}`);
+        if (inheritedPreset.brandColor) parts.push(`brandColor=${inheritedPreset.brandColor}`);
+        if (inheritedPreset.format) parts.push(`format=${inheritedPreset.format}`);
+        if (inheritedPreset.mode) parts.push(`mode=${inheritedPreset.mode}`);
+        if (parts.length) lines.push(`自研模板继承参数（务必沿用）：${parts.join('，')}`);
+      }
     }
   } else if (inheritStyle !== false) {
     lines.push(`风格继承要求：请保持专栏「${column.name}」一贯的视觉主题、配色与版式规范。`);
@@ -3405,7 +4110,14 @@ function buildNextIssueStarter({ column, issueNumber, folderPath, refItem, skill
   if (skillMeta?.prompt) {
     lines.push(`类型指令参考：${skillMeta.prompt.split('\n')[0]}`);
   } else {
-    lines.push(`类型指令参考：使用 Open Artifact 类型 \`${skillId}\` 创建作品。`);
+    lines.push(`类型指令参考：使用 Open Artifact 类型 \`${skillId}\` 创建作品${customType?.dir ? `（规范见 ${path.join(customType.dir, 'SKILL.md')}）` : ''}。`);
+  }
+  if (humanizeFirst) {
+    lines.push(`去 AI 味前置要求：创作前请先按 ${humanizerSkillPath()} 润色本期素材，去除空话与模板化表达，严格保留事实、数字与不确定程度。`);
+  }
+  if (useVoice) {
+    const voiceBlock = readVoicePromptBlock();
+    if (voiceBlock) lines.push(voiceBlock);
   }
   const cleanTopic = String(topic || '').trim();
   lines.push(`本期主题与素材：${cleanTopic || '（请先向我确认本期主题后再生成）'}`);
@@ -3451,6 +4163,7 @@ async function startNextIssue(input, agent) {
   const skillId = normalizeTypeId(input.skill || refItem?.skill || info.column.defaultType || 'slides') || 'slides';
   const skillMeta = SKILL_BY_ID[skillId] || null;
   const customType = !skillMeta ? scanCustomTypesLocal(ws).types.find((t) => t.id === skillId) : null;
+  const inheritedPreset = readInheritedCustomPreset(refItem?.root, skillId);
 
   const starter = buildNextIssueStarter({
     column: info.column,
@@ -3462,6 +4175,9 @@ async function startNextIssue(input, agent) {
     customType,
     topic: input.topic,
     inheritStyle: input.inheritStyle !== false,
+    useVoice: input.useVoice === true,
+    humanizeFirst: input.humanizeFirst === true,
+    inheritedPreset,
   });
 
   const launched = await launchAgent(starter, agent);
@@ -3475,9 +4191,27 @@ async function startNextIssue(input, agent) {
 
 async function startFromArtifact(input) {
   const agent = cleanAgentId(input.agent);
-  if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+  const ws = readState().workspaceRoot || '';
+  if (!ws) return { ok: false, error: '工作区未识别，无法启动 Agent' };
   if (input.action === 'next-issue') {
     return startNextIssue(input, agent);
+  }
+  if (input.action === 'humanize') {
+    let validFile = '';
+    if (input.filePath) {
+      const checked = validateSampleFilePath(ws, input.filePath);
+      if (!checked.ok) return { ok: false, error: checked.error };
+      validFile = checked.path;
+    } else if (!String(input.text || '').trim()) {
+      return { ok: false, error: '请输入待润色文本或选择工作区文档' };
+    }
+    const starter = buildHumanizeStarter({
+      text: input.text,
+      filePath: validFile,
+      mode: input.mode === 'review' ? 'review' : 'rewrite',
+      useVoice: input.useVoice === true,
+    });
+    return launchAgent(starter, agent);
   }
   if (input.legacyMigrate) {
     const starter = `请协助检查并无损转换升级旧版设计作品目录：${input.legacyMigrate}（类型：${input.skill || ''}）。\n先备份原文件后再修复格式差异。报错信息：${input.error || ''}`;
@@ -3496,7 +4230,13 @@ async function startFromArtifact(input) {
   if (input.recipe) {
     const r = RECIPES.find((x) => x.id === String(input.recipe));
     if (!r) return { ok: false, error: '未知工作流' };
-    return launchAgent(r.template, agent);
+    const parts = [r.template];
+    if (r.usesHumanizer) parts.push(`去 AI 味参考技能文件路径：${humanizerSkillPath()}`);
+    if (input.useVoice) {
+      const voiceBlock = readVoicePromptBlock();
+      if (voiceBlock) parts.push(voiceBlock);
+    }
+    return launchAgent(parts.join('\n\n'), agent);
   }
   const root = String(input.root || '');
   const rec = findArtifact(root);
@@ -3548,6 +4288,98 @@ function installOatypePackage(filePath) {
   return { ok: true, id: info.id, version: info.version, dir: destDir };
 }
 
+let exportRenderDeps = {};
+function setExportRenderDeps(deps) {
+  exportRenderDeps = deps && typeof deps === 'object' ? deps : {};
+}
+
+let voiceScanDeps = {};
+function setVoiceScanDeps(deps) {
+  voiceScanDeps = deps && typeof deps === 'object' ? deps : {};
+}
+
+async function handleExportRenderHttp(input) {
+  const ws = readState().workspaceRoot || '';
+  const req = { ...(input && typeof input === 'object' ? input : {}) };
+  if (req.url && /^file:/i.test(String(req.url).trim())) {
+    return { ok: false, code: 'invalid_argument', error: 'HTTP export route only permits loopback http:// URLs or registered artifact roots.' };
+  }
+  let artifactDir = '';
+  let inferredSkill = normalizeTypeId(req.skill || '');
+  if (req.root) {
+    const targetRoot = path.resolve(String(req.root));
+    if (!allowedArtifactRoot(targetRoot)) {
+      return { ok: false, code: 'invalid_argument', error: '作品路径无效或不在当前工作区内' };
+    }
+    artifactDir = targetRoot;
+    req.artifactDir = targetRoot;
+    if (!inferredSkill) {
+      inferredSkill = normalizeTypeId(findArtifact(targetRoot)?.skill || '');
+      if (!inferredSkill) {
+        try {
+          const dot = JSON.parse(fs.readFileSync(path.join(targetRoot, '.artifact.json'), 'utf8'));
+          inferredSkill = normalizeTypeId(dot?.type || '');
+        } catch {}
+      }
+    }
+  } else if (req.artifactDir) {
+    const resolvedArt = path.resolve(String(req.artifactDir));
+    if (!allowedArtifactRoot(resolvedArt)) {
+      return { ok: false, code: 'invalid_argument', error: 'artifactDir 不在允许的工作区范围内' };
+    }
+    req.artifactDir = resolvedArt;
+    artifactDir = resolvedArt;
+  }
+
+  let contentData = req.content || null;
+  if (!contentData && artifactDir) {
+    try {
+      contentData = JSON.parse(fs.readFileSync(path.join(artifactDir, 'content.json'), 'utf8'));
+    } catch { contentData = null; }
+  }
+  if (req.format === 'html' && !req.content && !req.html && contentData) {
+    req.content = contentData;
+  }
+
+  if (req.typeDir) {
+    const resolvedType = path.resolve(String(req.typeDir));
+    const allowedTypeDirs = new Set([
+      ...scanCustomTypesLocal(ws).types.map((t) => path.resolve(t.dir)),
+      ...BUNDLED_CUSTOM_TYPES.map((id) => path.resolve(pluginRoot, 'custom-types', id)),
+    ]);
+    if (!allowedTypeDirs.has(resolvedType)) {
+      return { ok: false, code: 'invalid_argument', error: 'typeDir 未在已注册自定义类型中' };
+    }
+    req.typeDir = resolvedType;
+  } else if (!req.url && !req.html && inferredSkill) {
+    const matched = scanCustomTypesLocal(ws).types.find((t) => t.id === inferredSkill);
+    const bundledDir = BUNDLED_CUSTOM_TYPES.includes(inferredSkill) ? path.join(pluginRoot, 'custom-types', inferredSkill) : '';
+    const resolved = matched?.dir || (bundledDir && fs.existsSync(bundledDir) ? bundledDir : '');
+    if (resolved) req.typeDir = resolved;
+  }
+
+  if (inferredSkill === 'social-cards' && !req.cards && Array.isArray(contentData?.cards) && contentData.cards.length) {
+    const presetKey = req.preset && CARD_PRESETS[req.preset] ? req.preset : (contentData.format && CARD_PRESETS[contentData.format] ? contentData.format : 'xhs-3-4');
+    const dim = CARD_PRESETS[presetKey];
+    req.preset = presetKey;
+    req.cards = contentData.cards.map((_, idx) => ({
+      index: idx,
+      width: dim.width,
+      height: dim.height,
+      filename: `card-${String(idx + 1).padStart(2, '0')}.png`,
+    }));
+  }
+
+  const out = await exportRender(req, exportRenderDeps);
+  if (!out.ok) return out;
+  const baseName = (contentData?.title || inferredSkill || 'export').replace(/[^\w\u4e00-\u9fa5-]+/g, '-').slice(0, 48) || 'export';
+  const ext = out.format === 'zip' ? 'zip' : (out.format === 'pdf' ? 'pdf' : (out.format === 'html' ? 'html' : 'png'));
+  return {
+    ...out,
+    filename: `${baseName}.${ext}`,
+  };
+}
+
 const sseClients = new Set();
 onRuntimeProgress((ev) => {
   const line = `data: ${JSON.stringify(ev)}\n\n`;
@@ -3563,6 +4395,7 @@ const server = http.createServer(async (req, res) => {
   const allowedGet = [
     '/', '/api/health', '/api/list', '/api/preview', '/api/thumb',
     '/api/types', '/api/columns', '/api/runtime/status', '/api/runtime/events',
+    '/api/voice', '/api/voice/workspace-docs',
     '/vendor/harness-embed.mjs',
   ];
   const allowedPost = [
@@ -3573,6 +4406,8 @@ const server = http.createServer(async (req, res) => {
     '/api/columns/assign', '/api/columns/remove-item',
     '/api/runtime/retry', '/api/runtime/import',
     '/api/types/toggle', '/api/types/trust-project', '/api/types/install',
+    '/api/voice/save', '/api/voice/learn', '/api/voice/scan-sessions', '/api/voice/purge',
+    '/api/export-render',
   ];
   const isOaProxy = url.pathname.startsWith('/api/open-artifact.');
 
@@ -3588,6 +4423,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/list') return res.end(JSON.stringify(await listArtifactsViewsAsync()));
     if (url.pathname === '/api/types') return res.end(JSON.stringify(await listTypesInfo(readState().workspaceRoot)));
+    if (url.pathname === '/api/voice') return res.end(JSON.stringify(readVoiceStatus()));
+    if (url.pathname === '/api/voice/workspace-docs') {
+      const ws = readState().workspaceRoot || '';
+      return res.end(JSON.stringify({ ok: true, docs: listWorkspaceTextDocs(ws) }));
+    }
     if (url.pathname === '/api/columns') {
       const ws = readState().workspaceRoot || '';
       const store = readColumnsStore(ws);
@@ -3853,6 +4693,74 @@ const server = http.createServer(async (req, res) => {
         return finish({ ok: false, error: e.message });
       }
     }
+    if (url.pathname === '/api/voice/save') {
+      const out = saveVoiceProfile(input.content);
+      if (!out.ok) res.statusCode = 400;
+      return finish(out);
+    }
+    if (url.pathname === '/api/voice/learn') {
+      const ws = readState().workspaceRoot || '';
+      const rawPaths = Array.isArray(input.filePaths) ? input.filePaths : [];
+      const validPaths = [];
+      for (const fp of rawPaths) {
+        if (!String(fp || '').trim()) continue;
+        const checked = validateSampleFilePath(ws, fp);
+        if (!checked.ok) {
+          res.statusCode = 400;
+          return finish({ ok: false, error: checked.error });
+        }
+        validPaths.push(checked.path);
+      }
+      const inlineList = [];
+      if (typeof input.pastedText === 'string' && input.pastedText.trim()) inlineList.push(input.pastedText.trim());
+      if (Array.isArray(input.selectedSnippets)) {
+        for (const s of input.selectedSnippets) {
+          if (typeof s === 'string' && s.trim()) inlineList.push(s.trim());
+        }
+      }
+      if (!validPaths.length && !inlineList.length) {
+        res.statusCode = 400;
+        return finish({ ok: false, error: '请至少提供粘贴样本、本地文档或已勾选对话片段' });
+      }
+      const savedSamples = saveVoiceSamples(inlineList);
+      const starter = buildVoiceLearnStarter({
+        sampleFiles: [...validPaths, ...savedSamples.savedFiles],
+        inlineSamples: inlineList,
+        profileFilePath: voiceProfilePath(),
+      });
+      const launched = await launchAgent(starter, cleanAgentId(input.agent));
+      return finish({ ...launched, savedSampleCount: savedSamples.count });
+    }
+    if (url.pathname === '/api/voice/scan-sessions') {
+      const ws = readState().workspaceRoot || '';
+      const out = await scanOrcaSessionsForVoice(ws, voiceScanDeps);
+      return finish(out);
+    }
+    if (url.pathname === '/api/voice/purge') {
+      if (input.confirm !== true) {
+        res.statusCode = 400;
+        return finish({ ok: false, error: '需要 confirm: true 二次确认' });
+      }
+      return finish(purgeVoiceData());
+    }
+    if (url.pathname === '/api/export-render') {
+      const out = await handleExportRenderHttp(input);
+      if (!out.ok) {
+        if (out.code === 'invalid_argument') res.statusCode = 400;
+        return finish(out);
+      }
+      if (input.binary === true || url.searchParams.get('download') === '1') {
+        res.setHeader('content-type', out.mimeType || 'application/octet-stream');
+        res.setHeader('content-disposition', `attachment; filename="${encodeURIComponent(out.filename || 'export')}"`);
+        return res.end(out.buffer);
+      }
+      const { buffer, ...meta } = out;
+      return finish({
+        ...meta,
+        bytes: buffer.length,
+        dataBase64: buffer.toString('base64'),
+      });
+    }
     if (url.pathname === '/api/stop' || url.pathname === '/api/restart-editor') {
       return finish({ ok: true });
     }
@@ -3883,6 +4791,11 @@ export {
   writeRecord,
   startFromArtifact,
   buildNextIssueStarter,
+  buildHumanizeStarter,
+  buildVoiceLearnStarter,
+  handleExportRenderHttp,
+  setExportRenderDeps,
+  setVoiceScanDeps,
   GALLERY_STR,
   dshHome,
   server,
@@ -3890,6 +4803,7 @@ export {
 
 if (process.argv[1] === __filename) {
   migrateLegacyDesignHome();
+  try { syncBundledExtraTypes({ pluginRoot, designHome: dshHome(), oaHome: openArtifactHome() }); } catch {}
   server.on('error', (e) => console.error('gallery server error:', e.message));
   server.listen(PORT, '127.0.0.1', () => console.log(`gallery listening on ${PORT}`));
 }

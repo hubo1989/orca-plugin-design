@@ -10,13 +10,105 @@
         "url": "https://github.com/hubo1989/orca-plugin-design.git",
         "ref": "main"
       },
-      "description": "Orca-Design — 五类设计作品（幻灯片/设计/设计系统/看板/动效）在一个项目库 Tab 中管理",
+      "description": "Orca-Design — 9 类内置作品、自研 .oatype 模板（社媒卡片/长页排版）、专栏归组与 MIT 去 AI 味/语气档案工作台在一个项目库 Tab 中管理",
       "homepage": "https://github.com/hubo1989/orca-plugin-design",
       "categories": [
         "design",
         "productivity"
       ],
       "releases": [
+        {
+          "version": "0.3.0",
+          "commit": "23394cb801bc97516cbf78e347ed1b1f3ed7024e",
+          "contentHash": "e6838d1e726b1291ecb639042cb5c1c12ec4b723fba665aae6548aec2cac4447",
+          "execution": "trusted-worker",
+          "minimumOrca": "1.4.248",
+          "name": "Orca-Design",
+          "contributes": [
+            {
+              "kind": "commands",
+              "name": "Open Design Canvas Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Slides Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Design System Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Motion Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Data Dashboard Editor"
+            },
+            {
+              "kind": "commands",
+              "name": "Open Design Gallery"
+            },
+            {
+              "kind": "events",
+              "name": "workspace.changed"
+            },
+            {
+              "kind": "events",
+              "name": "agent.status.changed"
+            },
+            {
+              "kind": "keybindings",
+              "name": "Mod+Alt+P",
+              "detail": "prototype.gallery"
+            },
+            {
+              "kind": "newFiles",
+              "name": "HTML Prototype (.proto.html)",
+              "detail": ".proto.html"
+            },
+            {
+              "kind": "statusBarItems",
+              "name": "Design"
+            }
+          ],
+          "capabilities": [
+            "workspace:read",
+            "agent:read"
+          ],
+          "images": {
+            "icon": {
+              "path": "assets/icon.png",
+              "alt": "Orca-Design",
+              "sha256": "b73953997edbbe05ee8f3e64365f8518d6913313e0a75804537ca38200b678eb",
+              "width": 128,
+              "height": 128
+            },
+            "cover": {
+              "path": "assets/cover.png",
+              "alt": "Orca-Design 项目库：设计工具入口与作品卡片",
+              "sha256": "b2c31787397e8916c3dae5217b8b65749fb698957573de2ff36c41879e6d7793",
+              "width": 1600,
+              "height": 1000
+            },
+            "screenshots": [
+              {
+                "path": "assets/gallery.png",
+                "alt": "项目库页面：新建入口与作品卡片",
+                "sha256": "8a2497747767e3345a564ad2f6958cab79fad0604073ae79f7a133ea4d01d154",
+                "width": 1280,
+                "height": 800
+              },
+              {
+                "path": "assets/editor.png",
+                "alt": "画布编辑器：无限画布与工具栏",
+                "sha256": "b7aa9266c319b6579df94d5b3b5870d1a5bb88878f765853f60eca280533b0fc",
+                "width": 1280,
+                "height": 800
+              }
+            ]
+          }
+        },
         {
           "version": "0.2.1",
           "commit": "3eff2092903a57476e92b5e3bdee36b0e39252e1",
