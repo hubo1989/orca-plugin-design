@@ -2,27 +2,27 @@
   "manifestVersion": 2,
   "id": "prototype-studio",
   "name": "Orca-Design",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "execution": "trusted-worker",
   "main": "src/worker.js",
-  "description": "Design projects in Orca: canvas, slides, design systems, dashboard and motion editors in one gallery tab.",
+  "description": "Design projects in Orca powered by Open Artifact: 9 built-in artifact types, custom .oatype support, and legacy .design/ compatibility in one gallery tab.",
   "license": "MIT",
   "homepage": "https://github.com/hubo1989/orca-plugin-design",
   "icon": "assets/icon.png",
   "cover": {
     "path": "assets/cover.png",
-    "alt": "Orca-Design 项目库：五类设计工具入口与作品卡片"
+    "alt": "Orca-Design 项目库：设计工具入口与作品卡片"
   },
   "screenshots": [
     {
       "path": "assets/gallery.png",
-      "alt": "项目库页面：新建入口与三张作品卡片",
+      "alt": "项目库页面：新建入口与作品卡片",
       "caption": "一个入口管理全部设计作品"
     },
     {
       "path": "assets/editor.png",
       "alt": "画布编辑器：无限画布与工具栏",
-      "caption": "库内同 Tab 打开的画布编辑器"
+      "caption": "库内同 Tab 打开的编辑器"
     }
   ],
   "engines": {
@@ -32,12 +32,12 @@
     "commands": [
       {
         "id": "prototype.skill.claude-design",
-        "title": "Open Claude Design Editor",
+        "title": "Open Design Canvas Editor",
         "when": "workspace"
       },
       {
         "id": "prototype.skill.claude-slides",
-        "title": "Open Claude Slides Editor",
+        "title": "Open Slides Editor",
         "when": "workspace"
       },
       {
@@ -47,12 +47,12 @@
       },
       {
         "id": "prototype.skill.claude-motion",
-        "title": "Open Claude Motion Editor",
+        "title": "Open Motion Editor",
         "when": "workspace"
       },
       {
         "id": "prototype.skill.claude-dashboard",
-        "title": "Open Claude Dashboard Editor",
+        "title": "Open Data Dashboard Editor",
         "when": "workspace"
       },
       {

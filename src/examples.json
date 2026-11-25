@@ -1,5 +1,5 @@
 {
-  "claude-design": {
+  "design": {
     "title": "单页画布",
     "desc": "用蓝色主视觉与居中标题开始一张可编辑画布。",
     "points": "880 × 560 画布、蓝色背景、居中大标题、可编辑 DC 组件",
@@ -9,7 +9,7 @@
       "project/Main.dc.html": "<!doctype html><html><head><meta charset=\"utf-8\"><script src=\"./support.js\"></script><style>body{margin:0;font-family:-apple-system,sans-serif}x-dc{display:block;width:880px;height:560px;background:#0ea5e9;color:#fff;display:flex;align-items:center;justify-content:center}h1{font-size:64px}</style></head><body><x-dc><h1>Hello Canvas</h1></x-dc>\n<script type=\"text/x-dc\" data-dc-script data-props='{\"$preview\":{\"width\":880,\"height\":560}}'>class Component extends DCLogic {}</script>\n</body></html>"
     }
   },
-  "claude-slides": {
+  "slides": {
     "title": "演示封面",
     "desc": "从深色背景与醒目标题开始一份演示文稿。",
     "points": "深色封面、居中大标题、可扩展的幻灯片顺序",
@@ -19,7 +19,7 @@
       "project/slides/cover.html": "<section style=\"background:#1e293b;color:#fff;display:flex;align-items:center;justify-content:center\"><h1 style=\"font-size:96px;font-family:-apple-system,sans-serif\">示例演示</h1></section>"
     }
   },
-  "claude-design-system": {
+  "design-system": {
     "title": "品牌设计系统",
     "desc": "从 token 与项目说明骨架建立品牌视觉规范。",
     "points": "品牌色、字体、间距 token 与组件规范；当前模板仅含索引、README 与空 token 文件",

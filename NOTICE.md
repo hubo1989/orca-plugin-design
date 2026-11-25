@@ -1,15 +1,11 @@
 # Notices
 
-This Orca plugin bundles code under several licenses:
+This Orca plugin (`Orca-Design`) uses a clear MIT + Apache-2.0 open-source license boundary:
 
-- The Orca plugin code, single-file bridge (`orca-single-file-bridge.js`), inline copy editor, and test harness are licensed under the MIT License.
-- The Anthropic Design canvas editor (`editor/assets/`, `editor/artifact-type/`) is adapted from Anthropic's claude.ai Artifact types. Their instructions, design assets, and icon fonts remain Anthropic's intellectual property and are not under the MIT License.
-- Third-party open-source dependencies used in the editor bundle are listed in `editor/third-party-licenses.txt`.
+1. **Orca-Design Plugin Code & Self-Developed Assets (MIT License)**
+   - The Orca plugin source code (`src/worker.js`, `src/gallery-server.mjs`, `src/runtime-manager.mjs`, `src/skills-meta.mjs`, `src/post-guard.mjs`), tools (`tools/`), templates (`templates/`), and test suite (`test/`) are licensed under the MIT License (see `LICENSE`).
 
-## Vendored: baoyu-design (2026-11-06, v2.12.0)
-
-`vendor/baoyu-design/` is a verbatim vendor of https://github.com/JimLiu/baoyu-design
-(`skills/` + `LICENSE` + `NOTICE.md` + changelogs + READMEs). Its three-tier license
-terms apply unchanged inside that directory; in particular the Anthropic-derived skill
-instructions and editor assets are NOT MIT and remain Anthropic's IP.
-See `vendor/baoyu-design/NOTICE.md` for the authoritative text.
+2. **Open Artifact Harness SDK & On-Demand Runtime (Apache License 2.0)**
+   - Bundled SDK files `src/vendor/harness-kit.mjs` and `src/vendor/harness-embed.mjs` are built from `@open-artifact/harness-kit` (`https://github.com/JimLiu/open-artifact`, Copyright 2026 Jim Liu 宝玉) under the Apache License, Version 2.0.
+   - The Open Artifact runtime (`@open-artifact/cli`, defined in `vendor/runtime-manifest.json` and downloaded on demand or reused locally in `~/.agents/open-artifact/runtime/`) is licensed under the Apache License, Version 2.0.
+   - See `vendor/LICENSE.open-artifact` and `vendor/NOTICE.open-artifact` for the full Apache-2.0 license text and upstream attribution.
