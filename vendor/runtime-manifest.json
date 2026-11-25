@@ -1,0 +1,14 @@
+{
+  "package": "@open-artifact/cli",
+  "version": "0.14.7",
+  "integrity": "sha512-PpA4VYkE6R1kaxupJXymt4YA1KP0GonTk/pefAHJcHDn9JJq4hk1iBPLKSk2IRyLhFg/+2y2xlFFw6cfJVGMgw==",
+  "sizeBytes": 21605122,
+  "protocols": {
+    "min": 1,
+    "max": 1
+  },
+  "urls": [
+    "https://registry.npmjs.org/@open-artifact/cli/-/cli-0.14.7.tgz",
+    "https://registry.npmmirror.com/@open-artifact/cli/-/cli-0.14.7.tgz"
+  ]
+}

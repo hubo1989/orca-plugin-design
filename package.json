@@ -1,13 +1,13 @@
 {
   "name": "orca-plugin-prototype-viewer",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Orca-Design custom editor plugin for Orca",
+  "description": "Orca-Design custom editor plugin for Orca powered by Open Artifact",
   "scripts": {
     "test": "node --test 'test/**/*.mjs'",
     "package": "bash bin/package.sh",
     "package:full": "bash bin/package.sh --full"
   },
-  "license": "LicenseRef-Mixed"
+  "license": "MIT"
 }

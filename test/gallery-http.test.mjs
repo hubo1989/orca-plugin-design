@@ -7,10 +7,12 @@ import { execFileSync } from 'node:child_process';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-gallery-http-'));
 const wsDir = path.join(tmpDir, 'workspace');
-const designHome = path.join(tmpDir, 'baoyu-design');
+const designHome = path.join(tmpDir, 'orca-design');
+const oaHome = path.join(tmpDir, 'oa-home');
 const profileDb = path.join(tmpDir, 'profile-state.db');
 fs.mkdirSync(wsDir, { recursive: true });
 fs.mkdirSync(designHome, { recursive: true });
+fs.mkdirSync(oaHome, { recursive: true });
 
 execFileSync('sqlite3', [profileDb,
   'CREATE TABLE profile_state_documents (domain TEXT PRIMARY KEY, payload TEXT NOT NULL);'
@@ -21,6 +23,8 @@ execFileSync('sqlite3', [profileDb,
 const stateFile = path.join(tmpDir, 'prototype-studio-state.json');
 process.env.ORCA_STATE_FILE = stateFile;
 process.env.ORCA_DESIGN_HOME = designHome;
+process.env.OPEN_ARTIFACT_HOME = oaHome;
+process.env.ORCA_DESIGN_NO_THUMB = '1';
 process.env.ORCA_PROFILE_DB = profileDb;
 process.env.ORCA_CLI_COMMAND = path.join(tmpDir, 'mock-orca-cli');
 fs.writeFileSync(process.env.ORCA_CLI_COMMAND, '#!/bin/sh\necho \'{}\'\n', { mode: 0o755 });
@@ -48,13 +52,14 @@ const postHeaders = (extra = {}) => ({
 });
 
 test('GET state-changing routes are closed', async () => {
-  assert.equal((await hit('/api/open?skill=claude-design')).status, 404);
-  assert.equal((await hit('/api/open-url?skill=claude-design')).status, 404);
+  assert.equal((await hit('/api/open?skill=design')).status, 404);
+  assert.equal((await hit('/api/open-url?skill=design')).status, 404);
   assert.equal((await hit('/api/delete?root=/tmp')).status, 404);
+  assert.equal((await hit('/api/runtime/import')).status, 404);
 });
 
 test('POST guard rejects cross-site simple and JSON requests', async () => {
-  const body = JSON.stringify({ skill: 'claude-design' });
+  const body = JSON.stringify({ skill: 'design' });
   assert.equal((await hit('/api/delete', {
     method: 'POST', headers: { 'content-type': 'text/plain', origin: 'http://evil.example' }, body,
   })).status, 415);
@@ -64,19 +69,33 @@ test('POST guard rejects cross-site simple and JSON requests', async () => {
 });
 
 test('oversized POST returns 413 instead of dropping the socket', async () => {
-  const big = JSON.stringify({ skill: 'claude-design', root: 'x'.repeat(70000) });
+  const big = JSON.stringify({ skill: 'design', root: 'x'.repeat(70000) });
   const r = await hit('/api/register', { method: 'POST', headers: postHeaders(), body: big });
   assert.equal(r.status, 413);
   assert.equal(r.text, '{}');
 });
 
 test('valid POST reaches the handler without launching a missing editor', async () => {
-  // Unknown skill fails before execFile(artifact.mjs), so the test stays hermetic.
   const r = await hit('/api/open', {
     method: 'POST', headers: postHeaders(), body: JSON.stringify({ skill: 'not-a-skill' }),
   });
   assert.equal(r.status, 400);
   assert.match(r.text, /unknown skill/);
+});
+
+test('GET /api/types and /api/runtime/status return structured responses', async () => {
+  const typesRes = JSON.parse((await hit('/api/types')).text);
+  assert.equal(typesRes.ok, true);
+  assert.ok(typesRes.types.length >= 9);
+  const rtRes = JSON.parse((await hit('/api/runtime/status')).text);
+  assert.equal(rtRes.ok, true);
+  assert.ok(typeof rtRes.state === 'string');
+});
+
+test('GET /vendor/harness-embed.mjs serves browser embed module', async () => {
+  const r = await hit('/vendor/harness-embed.mjs');
+  assert.equal(r.status, 200);
+  assert.match(r.text, /embedArtifact/);
 });
 
 test('host theme is injected into the first paint', () => {
@@ -85,6 +104,7 @@ test('host theme is injected into the first paint', () => {
 });
 
 test.after(async () => {
+  server.closeAllConnections?.();
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

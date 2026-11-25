@@ -1,64 +1,115 @@
 #!/usr/bin/env node
 // Orca-Design · 独立项目库服务（detached，固定 3480）
-// 视觉与交互完全对齐 dsh-claude-artifacts (baoyu-design v2.12.0)
+// 职责：工作区作品懒扫描、旧 .design/ 兼容、Open Artifact Daemon Token 代理、同 Tab Shell 内嵌与运行时按需分发
 import { execFile, execFileSync } from 'node:child_process';
-import http from 'node:http';
-import path from 'node:path';
-import fs from 'node:fs';
-import os from 'node:os';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { guardPost, MAX_BODY_BYTES } from './post-guard.mjs';
-
 import {
   SKILLS,
   SKILL_BY_ID,
   TITLES,
   TINTS,
   FOLDER,
-  ROOT_MARKERS,
-  DEFAULT_PORTS,
-  PROMPTS,
   RECIPES,
   EDITOR_FILES,
   NOT_CONTENT,
   EXAMPLE_TEMPLATES,
   EXAMPLE_INDEX,
+  normalizeTypeId,
+  resolveTypeMeta,
 } from './skills-meta.mjs';
+import {
+  ensureRuntime,
+  getRuntimeStatus,
+  importOfflineTarball,
+  onRuntimeProgress,
+  parseTarGzBuffer,
+} from './runtime-manager.mjs';
+import {
+  api as daemonApi,
+  createHarness,
+  ensureDaemon,
+  openArtifactHome,
+  readDaemon,
+} from './vendor/harness-kit.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
-const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
 const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
 const PORT = Number(process.env.PORT) || 3480;
 const EXAMPLES_INDEX = JSON.parse(fs.readFileSync(new URL('./examples.json', import.meta.url), 'utf8'));
 const OFFICIAL_EXAMPLES = [...new Set([...Object.keys(EXAMPLES_INDEX), ...Object.keys(EXAMPLE_TEMPLATES)])]
-  .filter((skill) => Object.hasOwn(SKILL_BY_ID, skill))
+  .map((id) => normalizeTypeId(id))
+  .filter((v, idx, arr) => v && arr.indexOf(v) === idx && Object.hasOwn(SKILL_BY_ID, v) && v !== 'page')
   .map((skill) => {
-    const example = EXAMPLES_INDEX[skill] || {};
+    const example = EXAMPLES_INDEX[skill] || EXAMPLES_INDEX[SKILL_BY_ID[skill]?.legacyId] || {};
     const template = EXAMPLE_TEMPLATES[skill] || {};
     const files = { ...template.files, ...example.files };
     return {
-      id: skill, skill,
+      id: skill,
+      skill,
       title: example.title || `${SKILL_BY_ID[skill].name}示例`,
       desc: example.desc || SKILL_BY_ID[skill].about,
       points: example.points || Object.keys(files).join('、'),
       html: Object.entries(files).find(([name]) => name.endsWith('.html'))?.[1] || '',
     };
   });
-const OPEN_TIMEOUT_MS = 30000;
+
 const TITLE_MAX = 200;
 const STAMP_MAX_ENTRIES = 20000;
 const TRASH_ID = /^[0-9a-f]{24}-\d+$/;
 
+function orcaConfigParent() {
+  const home = process.env.HOME || os.homedir();
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'orca');
+  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca');
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'orca');
+}
+
 function dshHome() {
   const set = process.env.ORCA_DESIGN_HOME?.trim() || process.env.DSH_HOME?.trim();
   if (set) return set;
-  const home = process.env.HOME || os.homedir();
-  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'orca', 'baoyu-design');
-  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca', 'baoyu-design');
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'orca', 'baoyu-design');
+  return path.join(orcaConfigParent(), 'orca-design');
+}
+
+function legacyDshHome() {
+  const set = process.env.ORCA_DESIGN_LEGACY_HOME?.trim();
+  if (set) return set;
+  return path.join(orcaConfigParent(), 'baoyu-design');
+}
+
+export function migrateLegacyDesignHome(targetHome = dshHome(), sourceHome = legacyDshHome()) {
+  try {
+    if (path.resolve(targetHome) === path.resolve(sourceHome)) return { migrated: false, reason: 'same_dir' };
+    const marker = path.join(targetHome, '.migrated-v1');
+    if (fs.existsSync(marker)) return { migrated: false, reason: 'already_migrated' };
+    if (!fs.existsSync(sourceHome) || !fs.statSync(sourceHome).isDirectory()) {
+      return { migrated: false, reason: 'no_legacy_dir' };
+    }
+    fs.mkdirSync(targetHome, { recursive: true });
+    const copied = [];
+    for (const sub of ['artifacts', 'thumbs', 'trash']) {
+      const srcSub = path.join(sourceHome, sub);
+      const dstSub = path.join(targetHome, sub);
+      if (!fs.existsSync(srcSub)) continue;
+      fs.cpSync(srcSub, dstSub, { recursive: true, force: false, errorOnExist: false, preserveTimestamps: true });
+      copied.push(sub);
+    }
+    fs.writeFileSync(marker, JSON.stringify({
+      migratedAt: new Date().toISOString(),
+      source: sourceHome,
+      copied,
+    }, null, 2) + '\n', 'utf8');
+    return { migrated: true, copied };
+  } catch (err) {
+    return { migrated: false, error: err.message };
+  }
 }
 
 function artifactsDir() { return path.join(dshHome(), 'artifacts'); }
@@ -74,17 +125,19 @@ function thumbPath(root) { return path.join(thumbsDir(), `${folderHash(root)}.pn
 
 const pendingThumbs = new Set();
 function ensureThumb(rec) {
+  if (process.env.ORCA_DESIGN_NO_THUMB === '1') return;
   try {
     if (pendingThumbs.has(rec.root) || fs.existsSync(thumbPath(rec.root)) || !previewEntry(rec.root, rec.skill)) return;
     const url = new URL(`http://127.0.0.1:${PORT}/api/preview`);
     url.searchParams.set('skill', rec.skill);
     url.searchParams.set('root', rec.root);
     pendingThumbs.add(rec.root);
-    execFile(process.execPath, [path.join(pluginRoot, 'tools/thumb.mjs'), url.href, thumbPath(rec.root)],
+    const child = execFile(process.execPath, [path.join(pluginRoot, 'tools/thumb.mjs'), url.href, thumbPath(rec.root)],
       { timeout: 30000 }, (err, stdout, stderr) => {
         pendingThumbs.delete(rec.root);
         if (err) console.error(`thumbnail: ${String(stderr?.trim() || err.message).split(/\r?\n/)[0]}`);
       });
+    child.unref?.();
   } catch (err) {
     pendingThumbs.delete(rec.root);
     console.error(`thumbnail: ${String(err.message).split(/\r?\n/)[0]}`);
@@ -120,37 +173,46 @@ function findArtifact(root) {
   return r?.root === root ? r : null;
 }
 
-// 预览与登记共用同一根目录边界；真实路径检查阻止 .design 内的符号链接逃逸。
 function allowedArtifactRoot(root) {
   if (typeof root !== 'string' || !path.isAbsolute(root)) return false;
   if (findArtifact(root)) return true;
   const ws = readState().workspaceRoot;
   if (!ws) return false;
-  const designDir = path.resolve(ws, '.design');
-  if (!path.resolve(root).startsWith(designDir + path.sep)) return false;
-  try {
-    const realDesignDir = path.join(fs.realpathSync(ws), '.design');
-    return fs.realpathSync(designDir) === realDesignDir &&
-      fs.realpathSync(root).startsWith(realDesignDir + path.sep);
-  } catch { return false; }
+  const wsReal = (() => { try { return fs.realpathSync(ws); } catch { return ''; } })();
+  if (!wsReal) return false;
+  const resolved = path.resolve(root);
+  for (const sub of ['.design', 'artifacts']) {
+    const base = path.resolve(ws, sub);
+    if (resolved.startsWith(base + path.sep)) {
+      try {
+        const realBase = path.join(wsReal, sub);
+        if (fs.realpathSync(base) === realBase && fs.realpathSync(root).startsWith(realBase + path.sep)) return true;
+      } catch { /* ignore */ }
+    }
+  }
+  return false;
 }
 
 function registerArtifact(input) {
-  if (!input || typeof input !== 'object' || typeof input.skill !== 'string' || !Object.hasOwn(SKILL_BY_ID, input.skill)) {
-    return { ok: false, error: '未知技能' };
+  const skill = normalizeTypeId(input?.skill);
+  if (!input || typeof input !== 'object' || !skill || !Object.hasOwn(SKILL_BY_ID, skill)) {
+    return { ok: false, error: '未知作品类型' };
   }
   if (!validWsRoot(input.root)) return { ok: false, error: 'root 必须是存在的绝对目录路径' };
   const root = path.resolve(input.root);
-  if (!allowedArtifactRoot(root)) return { ok: false, error: 'root 不在工作区 .design/ 内且尚未登记' };
+  if (!allowedArtifactRoot(root)) return { ok: false, error: 'root 不在工作区 .design/ 或 artifacts/ 内且尚未登记' };
   for (const key of ['title', 'note']) {
     if (input[key] !== undefined && typeof input[key] !== 'string') {
       return { ok: false, error: `${key} 必须是字符串` };
     }
   }
   const before = findArtifact(root);
-  const record = before ? { ...before } : {
-    v: 1, root, skill: input.skill,
-    title: input.title?.trim() || path.basename(root), openedAt: new Date().toISOString(),
+  const record = before ? { ...before, skill } : {
+    v: 1,
+    root,
+    skill,
+    title: input.title?.trim() || path.basename(root),
+    openedAt: new Date().toISOString(),
   };
   if (input.title !== undefined) record.title = input.title.trim().slice(0, TITLE_MAX) || path.basename(root);
   if (input.note !== undefined) record.note = input.note.trim().slice(0, 2000);
@@ -162,7 +224,8 @@ function registerArtifact(input) {
 }
 
 function artifactTitle(skill, root) {
-  const at = TITLES[skill];
+  const norm = normalizeTypeId(skill);
+  const at = TITLES[norm];
   if (!at) return '';
   try {
     const val = JSON.parse(fs.readFileSync(path.join(root, at[0]), 'utf8'))[at[1]];
@@ -172,23 +235,25 @@ function artifactTitle(skill, root) {
   return '';
 }
 
-function recordOpened(skill, root, now = new Date()) {
+function recordOpened(skill, root, now = new Date(), extra = {}) {
+  const norm = normalizeTypeId(skill) || skill;
   const file = recordFile(root);
   const before = readRecord(file);
   const mine = before?.root === root ? before : null;
-  const s = SKILL_BY_ID[skill];
+  const s = SKILL_BY_ID[norm];
   const record = {
     v: 1,
     root,
-    skill,
-    plugin: s?.plugin || `dsh-${skill}`,
+    skill: norm,
+    plugin: s?.plugin || `open-artifact-${norm}`,
     sessionId: mine?.sessionId || '',
-    title: artifactTitle(skill, root) || before?.title || path.basename(root),
+    title: artifactTitle(norm, root) || before?.title || path.basename(root),
     openedAt: now.toISOString(),
     firstOpenedAt: mine ? (mine.firstOpenedAt || mine.openedAt) : now.toISOString(),
     ...(mine?.pinned ? { pinned: true } : {}),
     ...(mine?.note !== undefined ? { note: mine.note } : {}),
     ...(mine?.id !== undefined ? { id: mine.id } : {}),
+    ...extra,
   };
   writeRecord(record);
   ensureThumb(record);
@@ -223,7 +288,8 @@ function isShared(root) {
 }
 
 function isDeletable(skill, root) {
-  const own = FOLDER[skill];
+  const norm = normalizeTypeId(skill);
+  const own = FOLDER[norm];
   if (!own) return false;
   const home = process.env.HOME || os.homedir();
   if (root === home || root === path.parse(root).root) return false;
@@ -245,7 +311,8 @@ function moveFolder(from, to) {
   }
 }
 
-function trashArtifact(record) {
+function trashArtifact(record, options = {}) {
+  const movePhysical = options.moveFolder !== undefined ? options.moveFolder === true : true;
   const id = `${folderHash(record.root)}-${Date.now()}`;
   const entry = path.join(trashDir(), id);
   try {
@@ -257,7 +324,7 @@ function trashArtifact(record) {
   } catch {}
   fs.mkdirSync(entry, { recursive: true });
   fs.writeFileSync(path.join(entry, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
-  const moved = isDeletable(record.skill, record.root);
+  const moved = movePhysical && isDeletable(record.skill, record.root);
   const p = path.join(entry, 'folder', path.basename(record.root));
   if (moved) moveFolder(record.root, p);
   fs.rmSync(recordFile(record.root), { force: true });
@@ -286,37 +353,30 @@ function cleanTitle(raw) {
 }
 
 async function renameArtifact(skill, root, title) {
-  const at = TITLES[skill];
-  if (!at) throw new Error(`no title to change for ${skill}`);
-  if (skill === 'claude-dashboard' || skill === 'claude-motion') {
-    const metaPath = path.join(root, at[0]);
-    if (fs.existsSync(metaPath)) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        meta[at[1]] = title;
-        writeWhole(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
-      } catch {}
-    }
-  } else {
+  const norm = normalizeTypeId(skill);
+  const at = TITLES[norm];
+  if (at) {
     const file = path.join(root, at[0]);
     if (fs.existsSync(file)) {
-      const idx = JSON.parse(fs.readFileSync(file, 'utf8'));
-      writeWhole(file, `${JSON.stringify({ ...idx, [at[1]]: title }, null, 2)}\n`);
+      try {
+        const idx = JSON.parse(fs.readFileSync(file, 'utf8'));
+        idx[at[1]] = title;
+        writeWhole(file, `${JSON.stringify(idx, null, 2)}\n`);
+      } catch { /* non-fatal */ }
     }
   }
   const rec = findArtifact(root);
   if (rec) {
     rec.title = title;
     writeRecord(rec);
+    if (rec.id) {
+      await callDaemonApi('artifacts.update', { id: rec.id, title }).catch(() => {});
+    }
   }
 }
 
-// 真实安装路径判定
 function installRoot() {
-  const home = process.env.HOME || os.homedir();
-  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'orca', 'plugins');
-  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca', 'plugins');
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'orca', 'plugins');
+  return path.join(orcaConfigParent(), 'plugins');
 }
 function isInstalledPluginPath(target) {
   const root = path.resolve(installRoot());
@@ -324,17 +384,13 @@ function isInstalledPluginPath(target) {
   return p === root || p.startsWith(root + path.sep);
 }
 
-// 读取焦点工作区
-const PROFILE_DB = process.env.ORCA_PROFILE_DB || path.join(process.env.HOME || os.homedir(), 'Library', 'Application Support', 'orca', 'profiles', 'local-default', 'profile-state.db');
+const PROFILE_DB = process.env.ORCA_PROFILE_DB || path.join(orcaConfigParent(), 'profiles', 'local-default', 'profile-state.db');
 
-// 路径合法性：绝对路径且当前真实存在的目录。防止把 DB 二进制垃圾当工作区
-// （曾因对 .db 原始字节做正则而扫出乱码路径，导致 0 项目 + 花屏工作区名）。
 function validWsRoot(p) {
   if (typeof p !== 'string' || !path.isAbsolute(p)) return false;
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
-// 宿主主题：settings.theme 是 dark/light/system；system 交给浏览器 prefers-color-scheme。
-// 30s 缓存避免每次库页首帧都同步查 SQLite，读取失败退回系统偏好链。
+
 let hostSchemeCache = { value: '', at: 0 };
 function hostScheme() {
   const now = Date.now();
@@ -346,7 +402,7 @@ function hostScheme() {
       { timeout: 1500, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const theme = JSON.parse(out).theme;
     if (theme === 'dark' || theme === 'light') value = theme;
-  } catch { /* 宿主 profile 不可读时退回 prefers-color-scheme */ }
+  } catch { /* fallback */ }
   hostSchemeCache = { value, at: now };
   return value;
 }
@@ -355,7 +411,6 @@ function readState() {
   let explicit = {};
   try { explicit = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
   if (validWsRoot(explicit.workspaceRoot)) return explicit;
-  // 唯一读取路径：sqlite3 CLI（正确处理 WAL）。绝不直接对 .db 字节做正则。
   try {
     const out = execFileSync('sqlite3', [PROFILE_DB,
       "SELECT payload FROM profile_state_documents WHERE domain='workspaceSession'"],
@@ -370,41 +425,48 @@ function readState() {
   return { workspaceRoot: '', workspaceName: '' };
 }
 
-function artifactCli(skillId) { return path.join(BAOYU_SKILLS_DIR, skillId, 'scripts', 'artifact.mjs'); }
-function runNode(args) {
-  return new Promise((resolve) => {
-    execFile(process.execPath, args, { timeout: OPEN_TIMEOUT_MS }, (err, stdout, stderr) =>
-      resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') }));
-  });
-}
-
 function projectMeta(skillId, root) {
+  const norm = normalizeTypeId(skillId);
   const read = (rel) => { try { return JSON.parse(fs.readFileSync(path.join(root, rel), 'utf8')); } catch { return null; } };
-  if (skillId === 'claude-design') {
+  if (norm === 'design') {
     const c = read('project/canvas.json');
     return c ? `${Object.keys(c.boards || {}).length} 画板` : '';
   }
-  if (skillId === 'claude-slides') {
+  if (norm === 'slides') {
     const d = read('project/deck.json');
     return d ? `${(d.order || []).length} 页` : '';
   }
-  if (skillId === 'claude-motion') {
+  if (norm === 'motion') {
     const sc = read('db/film/meta.json') || read('project/scenes.json');
     if (!sc) return '';
     const count = Array.isArray(sc) ? sc.length : (sc.scenes ? (Array.isArray(sc.scenes) ? sc.scenes.length : Object.keys(sc.scenes).length) : Object.keys(sc).length);
     return count ? `${count} 场景` : '';
   }
-  if (skillId === 'claude-design-system') {
+  if (norm === 'design-system') {
     try {
       return `${fs.readdirSync(path.join(root, 'project', 'components'), { withFileTypes: true }).filter((e) => e.isDirectory()).length} 组件`;
     } catch { return ''; }
   }
-  if (skillId === 'claude-dashboard') {
-    try {
-      const meta = read('db/dash/meta.json');
-      return meta?.sheets ? `${Object.keys(meta.sheets).length} 报表` : '看板';
-    } catch { return ''; }
+  if (norm === 'data') {
+    const meta = read('db/dash/meta.json');
+    return meta?.sheets ? `${Object.keys(meta.sheets).length} 报表` : '看板';
   }
+  if (norm === 'whiteboard') {
+    const meta = read('db/board/meta.json');
+    const count = meta?.elements ? Object.keys(meta.elements).length : 0;
+    return count ? `${count} 要素` : '白板';
+  }
+  if (norm === 'sheets') {
+    const sheet = read('sheet/sheet.json');
+    const count = Array.isArray(sheet?.sheets) ? sheet.sheets.length : (sheet?.sheets ? Object.keys(sheet.sheets).length : 0);
+    return count ? `${count} 工作表` : '工作表';
+  }
+  if (norm === 'docs') {
+    const doc = read('doc/doc.json');
+    const count = Array.isArray(doc?.tabs) ? doc.tabs.length : 0;
+    return count ? `${count} 标签页` : '文档';
+  }
+  if (norm === 'page') return '自由页面';
   return '';
 }
 
@@ -421,12 +483,50 @@ function scanDesignProjects(rootDir) {
       const p = path.join(dir, e.name);
       if (isInstalledPluginPath(p)) continue;
       let matched = false;
+      let dotArtifact = null;
+      const dotFile = path.join(p, '.artifact.json');
+      if (fs.existsSync(dotFile)) {
+        try { dotArtifact = JSON.parse(fs.readFileSync(dotFile, 'utf8')); } catch {}
+      }
       for (const s of SKILLS) {
-        if (fs.existsSync(path.join(p, s.marker))) {
-          found.push({ skill: s.id, root: p, title: artifactTitle(s.id, p) || e.name });
+        if (s.id === 'page') {
+          if (dotArtifact && (dotArtifact.type === 'page' || !dotArtifact.type) && fs.existsSync(path.join(p, 'index.html'))) {
+            found.push({
+              skill: 'page',
+              root: p,
+              title: dotArtifact.title || e.name,
+              adopted: true,
+              id: dotArtifact.id || '',
+            });
+            matched = true;
+            break;
+          }
+          continue;
+        }
+        if (s.detect.some((mk) => fs.existsSync(path.join(p, mk)))) {
+          found.push({
+            skill: s.id,
+            root: p,
+            title: artifactTitle(s.id, p) || dotArtifact?.title || e.name,
+            adopted: Boolean(dotArtifact?.id),
+            id: dotArtifact?.id || '',
+          });
           matched = true;
           break;
         }
+      }
+      if (!matched && dotArtifact && typeof dotArtifact.type === 'string' && dotArtifact.type) {
+        found.push({
+          skill: normalizeTypeId(dotArtifact.type),
+          root: p,
+          title: dotArtifact.title || e.name,
+          adopted: Boolean(dotArtifact.id),
+          id: dotArtifact.id || '',
+          typeUid: dotArtifact.typeUid || '',
+          typeSource: dotArtifact.typeSource || '',
+          typeRelease: dotArtifact.typeRelease || '',
+        });
+        matched = true;
       }
       if (!matched) walk(p, depth + 1);
     }
@@ -434,11 +534,14 @@ function scanDesignProjects(rootDir) {
   return found;
 }
 
-// 静态预览入口：返回作品的首个 HTML（幻灯片取 project/slides/，其余取 project/）。
-// 设计系统/看板/动效是 db 结构无静态页，返回 null，卡片回退骨架图。
 function previewEntry(root, skill) {
   if (!root || !fs.existsSync(root)) return null;
-  const dirs = skill === 'claude-slides' ? ['project/slides', 'project'] : ['project'];
+  const norm = normalizeTypeId(skill);
+  if (norm === 'page') {
+    const idx = path.join(root, 'index.html');
+    return fs.existsSync(idx) ? idx : null;
+  }
+  const dirs = norm === 'slides' ? ['project/slides', 'project'] : ['project', '.'];
   for (const d of dirs) {
     try {
       const files = fs.readdirSync(path.join(root, d)).filter((f) => f.endsWith('.html')).sort();
@@ -448,45 +551,386 @@ function previewEntry(root, skill) {
   return null;
 }
 
-function listArtifactsViews() {
+// ---- Open Artifact Daemon & Harness-Kit 代理层 ----
+
+let harnessInstance = null;
+let harnessPromise = null;
+
+async function ensureHarnessConnected() {
+  if (harnessInstance && harnessInstance.connected) return harnessInstance;
+  if (harnessPromise) return harnessPromise;
+  harnessPromise = (async () => {
+    const rt = await ensureRuntime({ autoDownload: false });
+    if (!rt.ok) return null;
+    if (!harnessInstance) {
+      harnessInstance = await createHarness({
+        harness: 'orca-design',
+        agentName: 'Agent',
+        profile: { title: 'Orca-Design', agentName: 'Agent', level: 'L1' },
+        embed: { origins: [`http://127.0.0.1:${PORT}`], mode: 'frame', remote: 'ask' },
+        caps: { library: 'own' },
+        runtime: { dir: rt.dir, version: rt.version, update: 'bundled' },
+        home: openArtifactHome(),
+        autoStart: true,
+        log: (line) => console.log(`[oa-harness] ${line}`),
+      });
+    } else {
+      await harnessInstance.ready();
+    }
+    return harnessInstance;
+  })().finally(() => { harnessPromise = null; });
+  return harnessPromise;
+}
+
+async function getDaemonState({ start = false } = {}) {
+  const home = openArtifactHome();
+  let state = await readDaemon(home);
+  if (state || !start) return state;
+  const rt = await ensureRuntime();
+  if (!rt.ok) return null;
+  state = await ensureDaemon({
+    home,
+    own: { dir: rt.dir, version: rt.version },
+    timeoutMs: 12000,
+  });
+  ensureHarnessConnected().catch(() => {});
+  return state;
+}
+
+async function callDaemonApi(name, body, opts = {}) {
+  const home = openArtifactHome();
+  let state = await getDaemonState({ start: opts.start === true });
+  if (!state) {
+    return { ok: false, code: 'no_daemon', error: 'Open Artifact Daemon 未运行' };
+  }
+  try {
+    return await daemonApi(state, name, body, opts);
+  } catch (err) {
+    if (String(err?.status || err?.message).includes('401') || String(err?.status || err?.message).includes('403') || err?.code === 'ECONNREFUSED') {
+      state = await readDaemon(home);
+      if (state) return await daemonApi(state, name, body, opts);
+    }
+    throw err;
+  }
+}
+
+function readOaSettings() {
+  const file = path.join(openArtifactHome(), 'settings.json');
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch { return {}; }
+}
+
+function writeOaSettings(next) {
+  const file = path.join(openArtifactHome(), 'settings.json');
+  writeWhole(file, `${JSON.stringify(next, null, 2)}\n`);
+}
+
+function scanCustomTypesLocal(wsRoot) {
+  const settings = readOaSettings();
+  const disabled = new Set(Array.isArray(settings.disabledTypes) ? settings.disabledTypes : []);
+  const trustedProjects = new Set((Array.isArray(settings.trustedProjects) ? settings.trustedProjects : []).map((p) => path.resolve(p)));
+  const roots = [];
+  if (wsRoot) {
+    roots.push({
+      scope: 'project',
+      dir: path.resolve(wsRoot, settings.typeRoots?.project || '.agents/artifact-types'),
+      trusted: process.env.OPEN_ARTIFACT_TRUST_PROJECTS === '1' || trustedProjects.has(path.resolve(wsRoot)),
+    });
+  }
+  const expand = (p) => (p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : path.resolve(p));
+  roots.push({ scope: 'user', dir: expand(settings.typeRoots?.user || '~/.agents/artifact-types'), trusted: true });
+  for (const ex of settings.typeRoots?.extra || []) {
+    roots.push({ scope: 'extra', dir: expand(ex), trusted: true });
+  }
+  roots.push({ scope: 'installed', dir: path.join(openArtifactHome(), 'types'), trusted: false });
+
+  const found = [];
+  const seen = new Set();
+  for (const r of roots) {
+    let entries;
+    try { entries = fs.readdirSync(r.dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.')) continue;
+      if (seen.has(e.name)) continue;
+      const dir = path.join(r.dir, e.name);
+      const manifestFile = path.join(dir, 'artifact-type.json');
+      if (!fs.existsSync(manifestFile) && !fs.existsSync(path.join(dir, 'index.html'))) continue;
+      let m = {};
+      try { m = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch {}
+      seen.add(e.name);
+      found.push({
+        id: e.name,
+        title: m.title || m.name || e.name,
+        name: m.name || m.title || e.name,
+        description: m.description || m.summary || '',
+        category: m.category || 'Custom',
+        version: m.version || '0.1.0',
+        scope: r.scope,
+        trusted: r.trusted,
+        enabled: !disabled.has(e.name),
+        uses: m.openArtifact?.uses || [],
+        network: Array.isArray(m.openArtifact?.network) ? m.openArtifact.network : [],
+        detect: Array.isArray(m.detect) ? m.detect : [],
+        exports: m.openArtifact?.exports || [],
+        dir,
+      });
+    }
+  }
+  return { roots, types: found, disabledTypes: [...disabled], trustedProjects: [...trustedProjects] };
+}
+
+async function listTypesInfo(wsRoot) {
+  const localCustom = scanCustomTypesLocal(wsRoot);
+  const builtinViews = SKILLS.map((s) => ({
+    id: s.id,
+    title: s.nameEn,
+    name: s.name,
+    nameEn: s.nameEn,
+    category: s.category,
+    categoryEn: s.categoryEn,
+    description: s.about,
+    version: '0.14.7',
+    scope: 'builtin',
+    trusted: true,
+    enabled: !localCustom.disabledTypes.includes(s.id),
+    uses: s.uses,
+    network: [],
+    exports: s.exports,
+    tint: s.tint,
+    builtin: true,
+  }));
+
+  let daemonTypes = [];
+  const state = await getDaemonState({ start: false }).catch(() => null);
+  if (state) {
+    try {
+      const res = await daemonApi(state, 'types', undefined, {
+        query: wsRoot ? { workspace: wsRoot } : undefined,
+        signal: AbortSignal.timeout(1200),
+      });
+      if (Array.isArray(res?.types)) daemonTypes = res.types;
+    } catch { /* fallback to local */ }
+  }
+
+  const byId = new Map();
+  for (const b of builtinViews) byId.set(b.id, b);
+  for (const dt of daemonTypes) {
+    if (!dt?.id) continue;
+    const prev = byId.get(dt.id);
+    byId.set(dt.id, {
+      ...(prev || {}),
+      ...dt,
+      builtin: prev?.builtin || dt.scope === 'builtin',
+      tint: prev?.tint || '#6366f1',
+    });
+  }
+  for (const ct of localCustom.types) {
+    if (!byId.has(ct.id)) {
+      byId.set(ct.id, { ...ct, builtin: false, tint: '#6366f1' });
+    }
+  }
+  return {
+    ok: true,
+    types: [...byId.values()],
+    roots: localCustom.roots,
+    disabledTypes: localCustom.disabledTypes,
+    trustedProjects: localCustom.trustedProjects,
+  };
+}
+
+async function listArtifactsViewsAsync() {
   const state = readState();
   const workspaceRoot = state.workspaceRoot || '';
+  const typesInfo = await listTypesInfo(workspaceRoot);
+  const knownTypeMap = new Map(typesInfo.types.map((t) => [t.id, t]));
   const map = new Map();
 
-  // 1. 读取持久化历史记录
   let names = [];
   try { names = fs.readdirSync(artifactsDir()); } catch {}
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
     const rec = readRecord(path.join(artifactsDir(), name));
     if (rec === null) continue;
-    // 文件已不在：保留记录并显性化（missing），不再静默隐藏
-    if (!fs.existsSync(rec.root)) rec.missing = true;
-    map.set(rec.root, rec);
+    const normSkill = normalizeTypeId(rec.skill);
+    const normalized = { ...rec, skill: normSkill };
+    if (!fs.existsSync(normalized.root)) normalized.missing = true;
+    map.set(normalized.root, normalized);
   }
 
-  // 2. 混合扫描当前工作区，发现新项目自动录入持久化
+  const dState = await getDaemonState({ start: false }).catch(() => null);
+  if (dState) {
+    try {
+      const res = await daemonApi(dState, 'artifacts', undefined, { signal: AbortSignal.timeout(1200) });
+      for (const da of res?.artifacts || []) {
+        if (!da?.root) continue;
+        const inWs = workspaceRoot && (da.root === workspaceRoot || da.root.startsWith(path.resolve(workspaceRoot) + path.sep));
+        if (!inWs && !map.has(da.root)) continue;
+        const prev = map.get(da.root);
+        const normType = normalizeTypeId(da.type);
+        map.set(da.root, {
+          v: 1,
+          root: da.root,
+          skill: normType,
+          id: da.id,
+          url: da.url,
+          view_url: da.view_url,
+          title: da.title || prev?.title || path.basename(da.root),
+          openedAt: da.openedAt || prev?.openedAt || da.updatedAt || da.createdAt || new Date().toISOString(),
+          firstOpenedAt: prev?.firstOpenedAt || da.createdAt || da.openedAt || new Date().toISOString(),
+          updatedAt: da.contentAt || da.updatedAt || prev?.openedAt,
+          pinned: da.pinned === true || prev?.pinned === true,
+          note: prev?.note,
+          shared: da.shared === true,
+          missing: !fs.existsSync(da.root),
+          typeMissing: da.typeMissing === true,
+          typeUid: da.typeUid || prev?.typeUid || '',
+          typeSource: da.typeSource || prev?.typeSource || '',
+          typeRelease: da.typeRelease || prev?.typeRelease || '',
+          owner: da.owner || null,
+          adopted: true,
+        });
+      }
+    } catch { /* ignore daemon read timeout */ }
+  }
+
   if (workspaceRoot) {
     const scanned = scanDesignProjects(workspaceRoot);
+    const nowIso = new Date().toISOString();
     for (const item of scanned) {
-      if (!map.has(item.root)) {
-        const rec = recordOpened(item.skill, item.root, new Date());
-        map.set(item.root, rec);
+      const existing = map.get(item.root);
+      if (existing) {
+        existing.missing = false;
+        if (!existing.title && item.title) existing.title = item.title;
+        if (item.id && !existing.id) existing.id = item.id;
+        if (item.adopted) existing.adopted = true;
+      } else {
+        map.set(item.root, {
+          v: 1,
+          root: item.root,
+          skill: item.skill,
+          id: item.id || '',
+          title: item.title || path.basename(item.root),
+          openedAt: contentStamp(item.root) || nowIso,
+          firstOpenedAt: contentStamp(item.root) || nowIso,
+          pinned: false,
+          adopted: item.adopted === true,
+          typeUid: item.typeUid || '',
+          typeSource: item.typeSource || '',
+          typeRelease: item.typeRelease || '',
+        });
       }
     }
   }
 
-  // 3. 构建视图
   const views = [];
   for (const [root, rec] of map.entries()) {
-    const s = SKILL_BY_ID[rec.skill];
-    if (!s) continue;
-    const title = artifactTitle(rec.skill, root) || rec.title || path.basename(root);
-    const mtime = contentStamp(root);
+    const normSkill = normalizeTypeId(rec.skill);
+    const s = resolveTypeMeta(normSkill);
+    const typeInfo = knownTypeMap.get(normSkill);
+    const typeMissing = rec.typeMissing === true || (!s && !typeInfo);
+    const typeDisabled = Boolean(typeInfo && typeInfo.enabled === false);
+    const title = artifactTitle(normSkill, root) || rec.title || path.basename(root);
+    const mtime = rec.missing ? '' : contentStamp(root);
     views.push({
       root,
-      skill: rec.skill,
-      plugin: rec.plugin,
+      id: rec.id || '',
+      skill: normSkill,
+      plugin: rec.plugin || s?.plugin || `open-artifact-${normSkill}`,
+      sessionId: rec.sessionId || '',
+      title,
+      openedAt: rec.openedAt,
+      firstOpenedAt: rec.firstOpenedAt || rec.openedAt,
+      updatedAt: mtime || rec.updatedAt || rec.openedAt,
+      pinned: rec.pinned === true,
+      shared: rec.shared === true || isShared(root),
+      deletable: isDeletable(normSkill, root),
+      meta: projectMeta(normSkill, root),
+      note: typeof rec.note === 'string' ? rec.note : '',
+      tail: root.split('/').slice(-2).join('/'),
+      openable: !typeMissing && !typeDisabled && rec.missing !== true,
+      typeMissing,
+      typeDisabled,
+      typeUid: rec.typeUid || '',
+      typeSource: rec.typeSource || typeInfo?.scope || '',
+      typeTitle: typeInfo?.name || s?.name || normSkill,
+      adopted: Boolean(rec.id || rec.adopted),
+      missing: rec.missing === true,
+      preview: rec.missing === true ? false : !!previewEntry(root, normSkill),
+      thumb: rec.missing === true ? false : fs.existsSync(thumbPath(root)),
+      owner: rec.owner || null,
+    });
+  }
+
+  views.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    return (b.openedAt || '').localeCompare(a.openedAt || '');
+  });
+
+  return {
+    ok: true,
+    artifacts: views,
+    workspaceName: state.workspaceName || '',
+    workspaceRoot,
+    types: typesInfo.types,
+    runtime: getRuntimeStatus(),
+  };
+}
+
+function listArtifactsViews() {
+  const state = readState();
+  const workspaceRoot = state.workspaceRoot || '';
+  const localCustom = scanCustomTypesLocal(workspaceRoot);
+  const customMap = new Map(localCustom.types.map((t) => [t.id, t]));
+  const map = new Map();
+
+  let names = [];
+  try { names = fs.readdirSync(artifactsDir()); } catch {}
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const rec = readRecord(path.join(artifactsDir(), name));
+    if (rec === null) continue;
+    const normSkill = normalizeTypeId(rec.skill);
+    const normalized = { ...rec, skill: normSkill };
+    if (!fs.existsSync(normalized.root)) normalized.missing = true;
+    map.set(normalized.root, normalized);
+  }
+
+  if (workspaceRoot) {
+    const scanned = scanDesignProjects(workspaceRoot);
+    const nowIso = new Date().toISOString();
+    for (const item of scanned) {
+      if (!map.has(item.root)) {
+        map.set(item.root, {
+          v: 1,
+          root: item.root,
+          skill: item.skill,
+          id: item.id || '',
+          title: item.title || path.basename(item.root),
+          openedAt: contentStamp(item.root) || nowIso,
+          firstOpenedAt: contentStamp(item.root) || nowIso,
+          pinned: false,
+          adopted: item.adopted === true,
+        });
+      }
+    }
+  }
+
+  const views = [];
+  for (const [root, rec] of map.entries()) {
+    const normSkill = normalizeTypeId(rec.skill);
+    const s = resolveTypeMeta(normSkill);
+    const c = customMap.get(normSkill);
+    const typeMissing = !s && !c;
+    const typeDisabled = localCustom.disabledTypes.includes(normSkill);
+    const title = artifactTitle(normSkill, root) || rec.title || path.basename(root);
+    const mtime = rec.missing ? '' : contentStamp(root);
+    views.push({
+      root,
+      id: rec.id || '',
+      skill: normSkill,
+      plugin: rec.plugin || s?.plugin || `open-artifact-${normSkill}`,
       sessionId: rec.sessionId || '',
       title,
       openedAt: rec.openedAt,
@@ -494,21 +938,23 @@ function listArtifactsViews() {
       updatedAt: mtime || rec.openedAt,
       pinned: rec.pinned === true,
       shared: isShared(root),
-      deletable: isDeletable(rec.skill, root),
-      meta: projectMeta(rec.skill, root),
+      deletable: isDeletable(normSkill, root),
+      meta: projectMeta(normSkill, root),
       note: typeof rec.note === 'string' ? rec.note : '',
       tail: root.split('/').slice(-2).join('/'),
-      openable: true,
+      openable: !typeMissing && !typeDisabled && rec.missing !== true,
+      typeMissing,
+      typeDisabled,
+      adopted: Boolean(rec.id || rec.adopted),
       missing: rec.missing === true,
-      preview: rec.missing === true ? false : !!previewEntry(root, rec.skill),
+      preview: rec.missing === true ? false : !!previewEntry(root, normSkill),
       thumb: rec.missing === true ? false : fs.existsSync(thumbPath(root)),
     });
   }
 
-  // 排序：先置顶，再按 openedAt 倒序
   views.sort((a, b) => {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-    return b.openedAt.localeCompare(a.openedAt);
+    return (b.openedAt || '').localeCompare(a.openedAt || '');
   });
 
   return {
@@ -519,47 +965,215 @@ function listArtifactsViews() {
   };
 }
 
-async function openSkillEditor(skillId, rootInput) {
-  const meta = SKILL_BY_ID[skillId];
-  if (!meta) return { ok: false, error: `unknown skill: ${skillId}` };
+function isLegacyFolder(root) {
+  return ['project/deck.json', 'project/canvas.json', 'project/design-system.json', 'db/dash/meta.json', 'db/film/meta.json']
+    .some((mk) => fs.existsSync(path.join(root, mk)));
+}
+
+function validateLegacyJsonFiles(root, skill) {
+  const norm = normalizeTypeId(skill);
+  const at = TITLES[norm];
+  if (!at) return null;
+  const f = path.join(root, at[0]);
+  if (!fs.existsSync(f)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return `${at[0]} 不是有效的 JSON 对象`;
+    return null;
+  } catch (err) {
+    return `${at[0]} JSON 解析失败: ${err.message}`;
+  }
+}
+
+async function openSkillEditor(skillInput, rootInput) {
+  const norm = normalizeTypeId(skillInput);
+  const ws = readState().workspaceRoot || '';
+  const typesInfo = await listTypesInfo(ws);
+  const typeExists = typesInfo.types.some((t) => t.id === norm);
+  if (!typeExists && !SKILL_BY_ID[norm]) {
+    return { ok: false, error: `unknown skill: ${String(skillInput)}` };
+  }
+
   let root = rootInput;
   if (!root) {
-    const roots = listArtifactsViews().artifacts.filter((i) => i.skill === skillId);
-    if (!roots.length) return { ok: false, error: `no ${skillId} project` };
+    const roots = listArtifactsViews().artifacts.filter((i) => i.skill === norm && !i.missing);
+    if (!roots.length) return { ok: false, error: `no ${norm} project` };
     root = roots[0].root;
   }
-  // 使用官方默认端口，不加 --port，支持 artifact.mjs 热复用已运行的实例
-  const r = await runNode([artifactCli(skillId), 'open', root]);
-  if (r.err) return { ok: false, error: `artifact open failed: ${r.stderr || r.err.message}` };
-  const m = r.stdout.match(/\{[\s\S]*"url"[\s\S]*\}/);
-  if (!m) return { ok: false, error: `no url in artifact output: ${r.stdout.slice(0, 200)}` };
+
+  const typeInfo = typesInfo.types.find((t) => t.id === norm);
+  if (typeInfo && typeInfo.enabled === false) {
+    return { ok: false, code: 'type_disabled', error: `类型「${norm}」已停用，请先在类型管理中重新启用` };
+  }
+
+  if (norm === 'page' && (!typeInfo || typeInfo.builtin)) {
+    const hasIndex = fs.existsSync(path.join(root, 'index.html'));
+    if (hasIndex) {
+      recordOpened('page', root);
+      const url = `/api/preview?skill=page&root=${encodeURIComponent(root)}`;
+      return { ok: true, url, embedMode: 'static', l1Mode: true };
+    }
+  }
+
+  const jsonErr = validateLegacyJsonFiles(root, norm);
+  if (jsonErr) {
+    return {
+      ok: false,
+      code: 'legacy_incompatible',
+      error: jsonErr,
+      root,
+      skill: norm,
+      hasStaticHtml: Boolean(previewEntry(root, norm)),
+    };
+  }
+
+  const rtStatus = getRuntimeStatus();
+  if (rtStatus.state !== 'ready') {
+    ensureRuntime().catch(() => {});
+    return {
+      ok: false,
+      code: 'runtime_not_ready',
+      runtime: getRuntimeStatus(),
+      error: 'Open Artifact 运行时尚未就绪，正在后台下载',
+    };
+  }
+
   try {
-    const parsed = JSON.parse(m[0]);
-    recordOpened(skillId, root);
-    return { ok: true, url: parsed.url, reused: parsed.reused === true };
-  } catch {
-    return { ok: false, error: 'unparsable artifact output' };
+    const state = await getDaemonState({ start: true });
+    if (!state) {
+      return {
+        ok: false,
+        code: 'runtime_not_ready',
+        runtime: getRuntimeStatus(),
+        error: '无法启动 Open Artifact Daemon',
+      };
+    }
+
+    let rec = findArtifact(root);
+    let artifactId = rec?.id || '';
+    if (!artifactId) {
+      const adopted = await daemonApi(state, 'artifacts.adopt', {
+        folder: root,
+        title: artifactTitle(norm, root) || path.basename(root),
+      });
+      if (adopted?.error) {
+        if (isLegacyFolder(root)) {
+          return {
+            ok: false,
+            code: 'legacy_incompatible',
+            error: adopted.error.message || '老作品格式不兼容',
+            root,
+            skill: norm,
+            hasStaticHtml: Boolean(previewEntry(root, norm)),
+          };
+        }
+        return { ok: false, error: adopted.error.message || 'adopt failed' };
+      }
+      const matchId = String(adopted?.url || '').match(/art_[0-9a-z]+/);
+      artifactId = matchId ? matchId[0] : '';
+    }
+
+    if (!artifactId) {
+      return { ok: false, error: 'Daemon 未返回有效的 artifact id' };
+    }
+
+    const opened = await daemonApi(state, 'artifacts.open', { id: artifactId, host: false });
+    if (opened?.error) {
+      if (isLegacyFolder(root)) {
+        return {
+          ok: false,
+          code: 'legacy_incompatible',
+          error: opened.error.message || '老作品打开失败',
+          root,
+          skill: norm,
+          hasStaticHtml: Boolean(previewEntry(root, norm)),
+        };
+      }
+      return { ok: false, error: opened.error.message || 'artifacts.open failed' };
+    }
+
+    const boot = await daemonApi(state, 'artifacts.boot', undefined, { query: { id: artifactId } }).catch(() => null);
+    if (boot?.problem) {
+      if (isLegacyFolder(root)) {
+        return {
+          ok: false,
+          code: 'legacy_incompatible',
+          error: boot.problem,
+          root,
+          skill: norm,
+          hasStaticHtml: Boolean(previewEntry(root, norm)),
+        };
+      }
+      return { ok: false, error: boot.problem };
+    }
+
+    recordOpened(norm, root, new Date(), { id: artifactId });
+    return {
+      ok: true,
+      id: artifactId,
+      url: opened.view_url,
+      pageUrl: opened.page_url || opened.page,
+      embedMode: 'shell',
+      l1Mode: true,
+      newerRelease: Boolean(boot?.newerRelease),
+    };
+  } catch (err) {
+    if (isLegacyFolder(root)) {
+      return {
+        ok: false,
+        code: 'legacy_incompatible',
+        error: err.message,
+        root,
+        skill: norm,
+        hasStaticHtml: Boolean(previewEntry(root, norm)),
+      };
+    }
+    return { ok: false, error: `Open Artifact 打开失败: ${err.message}` };
   }
 }
 
-async function stopSkillEditor(skillId, root) {
-  const r = await runNode([artifactCli(skillId), 'stop', root]);
-  return r.err ? { ok: false, error: r.stderr || r.err.message } : { ok: true };
-}
-
-async function restartEditor(skillId, root) {
-  await stopSkillEditor(skillId, root);
-  return await openSkillEditor(skillId, root);
-}
-
-async function createExample(skillId, nameInput) {
-  const tpl = EXAMPLE_TEMPLATES[skillId];
-  if (!tpl) return { ok: false, error: `${skillId} 项目由 agent 创建（无静态示例模板）` };
+async function createExample(skillInput, nameInput) {
+  const norm = normalizeTypeId(skillInput);
   const base = readState().workspaceRoot || '';
   if (!base) return { ok: false, error: '当前工作区未识别，请稍后重试' };
+  if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
+    return { ok: false, error: `工作区路径在本机不可见（远程工作区或未挂载）：${base}` };
+  }
   if (isInstalledPluginPath(base)) {
     return { ok: false, error: '当前工作区是 Orca 插件安装路径，请切换到其他工作区创建设计项目' };
   }
+
+  const tpl = EXAMPLE_TEMPLATES[norm] || EXAMPLE_TEMPLATES[skillInput];
+  const rtReady = getRuntimeStatus().state === 'ready';
+  if (rtReady && !tpl && norm !== 'page') {
+    try {
+      const safe = String(nameInput || '').replace(/[^A-Za-z0-9_\u4e00-\u9fa5 -]/g, '').trim().slice(0, 60);
+      const designDir = path.join(base, '.design');
+      fs.mkdirSync(designDir, { recursive: true });
+      const slugBase = (safe || norm).replace(/[^A-Za-z0-9_-]/g, '-') || norm;
+      let folderName = slugBase;
+      let idx = 2;
+      while (fs.existsSync(path.join(designDir, folderName))) folderName = `${slugBase}-${idx++}`;
+      const folder = path.join(designDir, folderName);
+      const created = await callDaemonApi('artifacts.create', {
+        type: norm,
+        title: safe || SKILL_BY_ID[norm]?.nameEn || norm,
+        folder,
+      }, { start: true });
+      if (created?.id) {
+        recordOpened(norm, created.root || folder, new Date(), { id: created.id });
+        return { ok: true, root: created.root || folder, id: created.id, view_url: created.view_url };
+      }
+      if (created?.error) return { ok: false, error: created.error.message || 'Daemon 创建失败' };
+    } catch (err) {
+      return { ok: false, error: `创建失败: ${err.message}` };
+    }
+  }
+
+  if (!tpl) {
+    return { ok: false, error: `${norm} 项目由 Agent 或 Open Artifact 运行时创建（请等待运行时就绪或点击让 Agent 帮我做）` };
+  }
+
   const safe = String(nameInput || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
   const baseName = safe || tpl.dirName;
   const designDir = path.join(base, '.design');
@@ -571,18 +1185,19 @@ async function createExample(skillId, nameInput) {
     const p = path.join(root, rel);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     if (content === '__INDEX__') {
-      const idx = { ...EXAMPLE_INDEX[skillId], createdOnFiles: { v: 1, at: now }, title: name,
-        lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Example scaffold' } };
+      const idx = {
+        ...EXAMPLE_INDEX[norm],
+        createdOnFiles: { v: 1, at: now },
+        title: name,
+        lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Example scaffold' },
+      };
       fs.writeFileSync(p, JSON.stringify(idx, null, 2));
     } else {
       fs.writeFileSync(p, content, 'utf8');
     }
   }
-  recordOpened(skillId, root);
-  const chk = await runNode([artifactCli(skillId), 'check', root]);
-  let problems = null;
-  try { problems = JSON.parse(chk.stdout).problems ?? null; } catch {}
-  return { ok: true, root, problems };
+  recordOpened(norm, root);
+  return { ok: true, root };
 }
 
 const GALLERY_STR = {
@@ -594,6 +1209,7 @@ const GALLERY_STR = {
     "sortFilter": "排序和筛选",
     "switchView": "切换视图",
     "refresh": "刷新列表",
+    "typesBtn": "类型管理",
     "new": "新建",
     "examples": "官方示例",
     "workflows": "工作流",
@@ -609,10 +1225,12 @@ const GALLERY_STR = {
     "noMatches": "没有符合条件的作品",
     "noWorks": "还没有作品",
     "clearHint": "尝试清除搜索词或筛选条件。",
-    "emptyHint": "Agent 用 baoyu-design 的技能做出来的东西都会出现在这里。点上面的入口开始做一个。",
+    "emptyHint": "基于 Open Artifact 创建的 9 类及自定义作品都会出现在这里。点上面的入口开始做一个。",
     "clearFilters": "清除筛选",
     "projectPreview": "作品预览",
     "missing": "文件已不在",
+    "typeMissingBadge": "类型未安装",
+    "typeDisabledBadge": "类型已停用",
     "opening": "正在打开…",
     "more": "更多操作",
     "unpin": "取消固定",
@@ -635,11 +1253,12 @@ const GALLERY_STR = {
     "cancel": "取消",
     "save": "保存",
     "renameFailed": "重命名失败: ",
-    "deleteMove": "这会移除这个作品，它的文件夹移到应用数据目录下的 baoyu-design/trash。",
-    "deleteKeep": "这会把它从作品列表移除。它的文件夹里还有其他工程文件，所以留在原处：",
+    "deleteKeepDefault": "默认仅从项目库移除“{title}”的记录，原磁盘文件夹保持不动：",
+    "deleteAlsoMove": "同时将纯作品文件夹移入本地回收站（支持 10 秒撤销）",
     "deleteFailed": "删除失败: ",
     "copyPrompt": "📋 复制 Agent 提示词",
-    "createBlank": "✨ 创建空白示例",
+    "createBlank": "✨ 创建空白作品并打开",
+    "askAgentCreate": "🤖 让 Agent 帮我做",
     "promptCopied": "✓ 提示词已复制到剪贴板，发给 Agent 即可",
     "copyFailed": "复制失败，请手动复制：",
     "createFailed": "创建失败: ",
@@ -664,6 +1283,7 @@ const GALLERY_STR = {
     "exampleSkeleton": "此示例仅提供项目骨架，暂无静态页面。做同款后由 Agent 补充内容。",
     "close": "关闭",
     "exampleStarted": "已开新对话并发送示例草稿",
+    "agentStarted": "✓ 已拉起 Agent 新会话",
     "startFailed": "启动失败：",
     "draftPrefix": "；草稿：",
     "workflowFailed": "工作流启动失败: ",
@@ -684,19 +1304,65 @@ const GALLERY_STR = {
     "scenes": "{count} 场景",
     "components": "{count} 组件",
     "sheets": "{count} 报表",
+    "elements": "{count} 要素",
+    "worksheets": "{count} 工作表",
+    "tabs": "{count} 标签页",
     "dashboard": "看板",
+    "whiteboard": "白板",
+    "freePage": "自由页面",
     "samplePresentation": "示例演示",
     "renameDescription": "为「{title}」设置新的标题：",
     "renamed": "已重命名为「{title}」",
-    "deleteTitle": "删除“{title}”？",
-    "deleted": "已删除“{title}”。",
+    "deleteTitle": "移除“{title}”？",
+    "deleted": "已移入回收站“{title}”。",
     "removed": "已从作品里移除“{title}”，文件夹还在原处。",
     "createTitle": "新建「{title}」",
     "allWorksCount": "全部作品 ({count})",
     "remixSent": "✓ 已开新对话并发送同款草稿（{outcome}）",
     "workflowSent": "✓ 已开新对话并发送工作流草稿（{outcome}）",
     "languageButton": "EN",
-    "previewTitle": "{title}预览"
+    "previewTitle": "{title}预览",
+    "dsUniqueTitle": "当前工作区已有设计系统",
+    "dsUniqueDesc": "建议全项目统一复用同一套设计系统（{title}）。你可以直接打开已有设计系统，或确认再新建一套。",
+    "dsOpenExisting": "打开已有设计系统",
+    "dsCreateAnyway": "仍然新建",
+    "runtimePreparing": "正在准备 Open Artifact 运行时",
+    "runtimeProgress": "已下载 {received} / {total}，仅首次需要",
+    "runtimeRetry": "重试下载",
+    "runtimeImportOffline": "导入本地 .tgz 安装包",
+    "runtimeImportByPath": "或输入本地 .tgz 路径导入",
+    "runtimeImportPathPlaceholder": "/path/to/@open-artifact-cli-0.14.7.tgz",
+    "runtimeImportBtn": "导入并校验",
+    "runtimeReady": "✓ Open Artifact 运行时已就绪",
+    "runtimeImportFailed": "离线导入失败：",
+    "l1Banner": "评论已暂存，将在下次 Agent 对话或运行指令时读取",
+    "l1CopyComments": "复制评论指令发给 Agent",
+    "l1CommentCopied": "✓ 评论读取指令已复制，可直接发送给 Agent",
+    "legacyTitle": "旧版作品兼容提示",
+    "legacyDesc": "打开老作品「{title}」时检测到格式差异（原磁盘文件字节未修改）：{error}",
+    "legacyAgentConvert": "让 Agent 协助转换升级",
+    "legacyReadonlyPreview": "只读预览",
+    "legacyShowPath": "查看目录路径",
+    "legacyPathCopied": "路径已复制：{root}",
+    "unknownTypeTitle": "类型未安装（{type}）",
+    "unknownTypeDesc": "该作品依赖的自定义类型未安装或不可用。路径：{root}",
+    "unknownTypeMeta": "类型：{type} · UID：{uid} · 来源：{source}",
+    "openTypesManager": "前往类型管理",
+    "copyPath": "复制路径",
+    "typeDisabledTitle": "类型「{type}」已停用",
+    "typeDisabledDesc": "请先在类型管理中重新启用该类型后再打开。",
+    "typesManagerTitle": "类型与运行时管理",
+    "typesInstallTitle": "安装 .oatype 自定义类型包",
+    "typesInstallPathPlaceholder": "输入本地 .oatype 路径",
+    "typesPreviewBtn": "预览权限与信息",
+    "typesConfirmInstall": "确认安装",
+    "typesTrustProject": "信任当前项目类型",
+    "typesTrusted": "项目已信任",
+    "typesEnabled": "已启用",
+    "typesDisabled": "已停用",
+    "runtimeStatusLabel": "运行时状态",
+    "runtimeReadyShort": "已就绪（{source} · v{version}）",
+    "runtimeMissingShort": "未安装或下载中"
   },
   "en": {
     "works": "Projects",
@@ -706,6 +1372,7 @@ const GALLERY_STR = {
     "sortFilter": "Sort and filter",
     "switchView": "Switch view",
     "refresh": "Refresh list",
+    "typesBtn": "Types",
     "new": "Create",
     "examples": "Official examples",
     "workflows": "Workflows",
@@ -721,10 +1388,12 @@ const GALLERY_STR = {
     "noMatches": "No matching projects",
     "noWorks": "No projects yet",
     "clearHint": "Try clearing your search or filters.",
-    "emptyHint": "Projects made by your agent with baoyu-design appear here. Choose a tool above to get started.",
+    "emptyHint": "Artifacts created with Open Artifact appear here. Choose a type above to get started.",
     "clearFilters": "Clear filters",
     "projectPreview": "Project preview",
     "missing": "Files missing",
+    "typeMissingBadge": "Type not installed",
+    "typeDisabledBadge": "Type disabled",
     "opening": "Opening…",
     "more": "More actions",
     "unpin": "Unpin",
@@ -747,11 +1416,12 @@ const GALLERY_STR = {
     "cancel": "Cancel",
     "save": "Save",
     "renameFailed": "Rename failed: ",
-    "deleteMove": "This removes the project and moves its folder to baoyu-design/trash in the application data directory.",
-    "deleteKeep": "This removes the project from the list. Its folder contains other project files and stays at: ",
+    "deleteKeepDefault": "By default this only removes “{title}” from the library list. Its folder stays on disk:",
+    "deleteAlsoMove": "Also move the artifact folder to local trash (10s undo)",
     "deleteFailed": "Delete failed: ",
     "copyPrompt": "📋 Copy agent prompt",
-    "createBlank": "✨ Create blank example",
+    "createBlank": "✨ Create blank & open",
+    "askAgentCreate": "🤖 Ask Agent to create",
     "promptCopied": "✓ Prompt copied. Send it to your agent.",
     "copyFailed": "Copy failed. Copy this manually: ",
     "createFailed": "Create failed: ",
@@ -776,6 +1446,7 @@ const GALLERY_STR = {
     "exampleSkeleton": "This example provides a project scaffold without a static page. Remix it to have your agent add content.",
     "close": "Close",
     "exampleStarted": "Example draft sent to a new chat",
+    "agentStarted": "✓ Launched new agent chat",
     "startFailed": "Start failed: ",
     "draftPrefix": "; draft: ",
     "workflowFailed": "Workflow failed: ",
@@ -795,52 +1466,105 @@ const GALLERY_STR = {
     "pages": "{count} pages",
     "scenes": "{count} scenes",
     "components": "{count} components",
-    "sheets": "{count} sheets",
+    "sheets": "{count} reports",
+    "elements": "{count} items",
+    "worksheets": "{count} sheets",
+    "tabs": "{count} tabs",
     "dashboard": "Dashboard",
+    "whiteboard": "Whiteboard",
+    "freePage": "Page",
     "samplePresentation": "Sample presentation",
     "renameDescription": "Set a new title for “{title}”:",
     "renamed": "Renamed to “{title}”",
-    "deleteTitle": "Delete “{title}”?",
-    "deleted": "Deleted “{title}”.",
-    "removed": "Removed “{title}” from projects. Its folder stays in place.",
+    "deleteTitle": "Remove “{title}”?",
+    "deleted": "Moved “{title}” to trash.",
+    "removed": "Removed “{title}” from projects. Its folder stays on disk.",
     "createTitle": "Create “{title}”",
     "allWorksCount": "All projects ({count})",
     "remixSent": "✓ Remix draft sent to a new chat ({outcome})",
     "workflowSent": "✓ Workflow draft sent to a new chat ({outcome})",
     "languageButton": "中",
-    "previewTitle": "{title} preview"
+    "previewTitle": "{title} preview",
+    "dsUniqueTitle": "Design system already exists",
+    "dsUniqueDesc": "We recommend reusing the single workspace design system ({title}). Open it directly or confirm to create another.",
+    "dsOpenExisting": "Open existing",
+    "dsCreateAnyway": "Create anyway",
+    "runtimePreparing": "Preparing Open Artifact Runtime",
+    "runtimeProgress": "Downloaded {received} / {total} (first time only)",
+    "runtimeRetry": "Retry download",
+    "runtimeImportOffline": "Import local .tgz package",
+    "runtimeImportByPath": "Or enter local .tgz file path",
+    "runtimeImportPathPlaceholder": "/path/to/@open-artifact-cli-0.14.7.tgz",
+    "runtimeImportBtn": "Import & verify",
+    "runtimeReady": "✓ Open Artifact runtime ready",
+    "runtimeImportFailed": "Offline import failed: ",
+    "l1Banner": "Comments are saved locally and will be read on the next Agent turn or command.",
+    "l1CopyComments": "Copy comment instruction for Agent",
+    "l1CommentCopied": "✓ Comment prompt copied for Agent",
+    "legacyTitle": "Legacy Artifact Compatibility",
+    "legacyDesc": "Schema mismatch opening legacy artifact “{title}” (original files left untouched): {error}",
+    "legacyAgentConvert": "Ask Agent to convert",
+    "legacyReadonlyPreview": "Read-only preview",
+    "legacyShowPath": "Copy folder path",
+    "legacyPathCopied": "Path copied: {root}",
+    "unknownTypeTitle": "Type not installed ({type})",
+    "unknownTypeDesc": "This artifact requires an uninstalled custom type. Path: {root}",
+    "unknownTypeMeta": "Type: {type} · UID: {uid} · Source: {source}",
+    "openTypesManager": "Open Types Manager",
+    "copyPath": "Copy path",
+    "typeDisabledTitle": "Type “{type}” is disabled",
+    "typeDisabledDesc": "Enable this type in Types Manager before opening.",
+    "typesManagerTitle": "Types & Runtime Manager",
+    "typesInstallTitle": "Install .oatype custom type",
+    "typesInstallPathPlaceholder": "Local .oatype path",
+    "typesPreviewBtn": "Preview manifest & permissions",
+    "typesConfirmInstall": "Confirm install",
+    "typesTrustProject": "Trust project types",
+    "typesTrusted": "Project trusted",
+    "typesEnabled": "Enabled",
+    "typesDisabled": "Disabled",
+    "runtimeStatusLabel": "Runtime status",
+    "runtimeReadyShort": "Ready ({source} · v{version})",
+    "runtimeMissingShort": "Not installed or downloading"
   }
 };
-// Keep shared skill/example metadata in the same flat bilingual catalogue.
-for (const [index, skill] of SKILLS.entries()) {
-  for (const field of ['name', 'about', 'prompt']) GALLERY_STR.zh['skill.' + skill.id + '.' + field] = skill[field];
+
+for (const skill of SKILLS) {
+  GALLERY_STR.zh['skill.' + skill.id + '.name'] = skill.name;
+  GALLERY_STR.zh['skill.' + skill.id + '.about'] = skill.about;
+  GALLERY_STR.zh['skill.' + skill.id + '.prompt'] = skill.prompt;
   GALLERY_STR.en['skill.' + skill.id + '.name'] = skill.nameEn;
-  const [about, prompt] = [["Editable slides for presenting or exporting to PDF, HTML, or PowerPoint.", "Help me create a slide deck about: "], ["Explore editable designs side by side on a single canvas.", "Help me design: "], ["Build brand colors, typography, components, assets, and a brand guide.", "Help me create a design system for the brand: "], ["Create charts, metrics, and tables from your data, with live updates.", "Help me create a data dashboard from: "], ["Create short animations and export MP4 or GIF.", "Help me animate: "]][index];
-  GALLERY_STR.en['skill.' + skill.id + '.about'] = about;
-  GALLERY_STR.en['skill.' + skill.id + '.prompt'] = prompt;
+  GALLERY_STR.en['skill.' + skill.id + '.about'] = skill.aboutEn;
+  GALLERY_STR.en['skill.' + skill.id + '.prompt'] = skill.promptEn;
 }
 for (const [index, recipe] of RECIPES.entries()) {
-  const [title, desc] = [["Design system → Unified projects", "Build a design system, then create slides with its tokens."], ["Canvas concepts → Motion demo", "Explore canvas concepts, choose one, then animate it."], ["Data → Dashboard → Report", "Build a data dashboard, then create a presentation."], ["Canvas exploration → Design system", "Explore visual directions, then capture a reusable design system."]][index];
-  for (const field of ['title', 'desc']) GALLERY_STR.zh['recipe.' + recipe.id + '.' + field] = recipe[field];
+  const [title, desc] = [
+    ["Design system → Unified projects", "Build a design system, then create slides with its tokens."],
+    ["Canvas concepts → Motion demo", "Explore canvas concepts, choose one, then animate it."],
+    ["Data → Dashboard → Report", "Build a data dashboard, then create a presentation."],
+    ["Canvas exploration → Design system", "Explore visual directions, then capture a reusable design system."],
+  ][index];
+  GALLERY_STR.zh['recipe.' + recipe.id + '.title'] = recipe.title;
+  GALLERY_STR.zh['recipe.' + recipe.id + '.desc'] = recipe.desc;
   GALLERY_STR.en['recipe.' + recipe.id + '.title'] = title;
   GALLERY_STR.en['recipe.' + recipe.id + '.desc'] = desc;
 }
 const EXAMPLE_EN = {
-  "claude-design": [
+  "design": [
     "Single-page canvas",
     "Start an editable canvas with a blue background and a centered heading.",
-    "880 × 560 canvas, blue background, large centered heading, editable DC component"
+    "880 × 560 canvas, blue background, large centered heading, editable DC component",
   ],
-  "claude-slides": [
+  "slides": [
     "Presentation cover",
     "Start a presentation with a dark background and a bold heading.",
-    "Dark cover, large centered heading, expandable slide order"
+    "Dark cover, large centered heading, expandable slide order",
   ],
-  "claude-design-system": [
+  "design-system": [
     "Brand design system",
     "Establish brand guidelines from tokens and a project scaffold.",
-    "Brand colors, typography, spacing tokens, and component guidelines; this template contains an index, README, and empty token file"
-  ]
+    "Brand colors, typography, spacing tokens, and component guidelines",
+  ],
 };
 for (const example of OFFICIAL_EXAMPLES) {
   for (const [index, field] of ['title', 'desc', 'points'].entries()) {
@@ -860,13 +1584,12 @@ function galleryHtml(requestedLang = 'zh', requestedScheme = '') {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${text('works')} · Orca-Design</title>
 <script>
-// Select the remembered language before the first paint; the body renders synchronously.
 try {
   const requested = new URLSearchParams(location.search).get('lang');
   const saved = localStorage.getItem('ps_lang');
   const selected = ['zh', 'en'].includes(requested) ? requested : ['zh', 'en'].includes(saved) ? saved : 'zh';
   document.documentElement.lang = selected === 'en' ? 'en' : 'zh-CN';
-} catch { /* The server already supplied the URL/default language. */ }
+} catch {}
 </script>
 <style>
 html[data-i18n-pending] body { visibility: hidden; }
@@ -883,733 +1606,137 @@ html[data-i18n-pending] body { visibility: hidden; }
   --dsw-alias-label-caption: light-dark(#a1a1aa, #52525b);
   --dsw-alias-state-business-primary: light-dark(#1d64f2, #3b82f6);
   --dsw-alias-state-error-primary: light-dark(#dc2626, #ef4444);
+  --dsw-alias-state-warn-primary: light-dark(#d97706, #f59e0b);
   --dsw-focus-ring-color: light-dark(#1d64f2, #3b82f6);
   --dsw-focus-ring-width: 2px;
-  --dsh-frame-top-clearance: 0px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
-  margin: 0;
-  padding: 0;
   height: 100vh;
   overflow: hidden;
 }
-.bda-page {
-  position: relative;
-  width: 100%;
-  min-width: 0;
-  height: 100%;
-  min-height: 0;
-  color: var(--dsw-alias-label-primary);
-  background: var(--dsw-alias-bg-base);
-  font-size: 14px;
-  line-height: 1.6;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.bda-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  scrollbar-gutter: stable;
-}
-.bda-content {
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 0 clamp(24px, 4vw, 48px) 56px;
-}
-.bda-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px 16px;
-  padding-top: 28px;
-  margin-bottom: 24px;
-}
-.bda-heading-title {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-.bda-heading h1 {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 500;
-  line-height: 28px;
-}
-.bda-heading .bda-ws {
-  font-size: 13px;
-  color: var(--dsw-alias-label-tertiary);
-}
-.bda-tools {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-}
-.bda-tool {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-}
-.bda-tool:hover, .bda-tool[aria-expanded=true] {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
-}
-.bda-tool[data-active=true]::after {
-  content: "";
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dsw-alias-state-business-primary);
-}
-.bda-search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: min(240px, 50vw);
-  height: 32px;
-  padding: 0 8px 0 10px;
-  border: .5px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  color: var(--dsw-alias-label-tertiary);
-}
-.bda-search:focus-within {
-  border-color: var(--dsw-alias-state-business-primary);
-}
-.bda-search input {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  border: 0;
-  padding: 0;
-  background: none;
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  font-size: 13px;
-  outline: none;
-}
+html[data-scheme=dark] { color-scheme: dark; }
+html[data-scheme=light] { color-scheme: light; }
+.bda-page { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 1.6; }
+.bda-scroll { flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+.bda-content { max-width: 1120px; margin: 0 auto; padding: 0 clamp(24px, 4vw, 48px) 56px; }
+.bda-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; padding-top: 28px; margin-bottom: 24px; }
+.bda-heading-title { display: flex; align-items: baseline; gap: 12px; }
+.bda-heading h1 { margin: 0; font-size: 20px; font-weight: 500; line-height: 28px; }
+.bda-heading .bda-ws { font-size: 13px; color: var(--dsw-alias-label-tertiary); }
+.bda-tools { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.bda-tool { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.bda-tool:hover, .bda-tool[aria-expanded=true] { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.bda-tool[data-active=true]::after { content: ""; position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-business-primary); }
+.bda-search { display: flex; align-items: center; gap: 6px; width: min(240px, 50vw); height: 32px; padding: 0 8px 0 10px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 8px; color: var(--dsw-alias-label-tertiary); }
+.bda-search:focus-within { border-color: var(--dsw-alias-state-business-primary); }
+.bda-search input { flex: 1; min-width: 0; height: 100%; border: 0; padding: 0; background: none; color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; outline: none; }
 .bda-search input::placeholder { color: var(--dsw-alias-label-caption); }
-.bda-search input::-webkit-search-cancel-button { display: none; }
-.bda-search button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-right: -4px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  color: inherit;
-  cursor: pointer;
-}
-.bda-search button:hover { background: var(--dsw-alias-interactive-bg-hover); }
-/* 实时预览（懒加载缩放 iframe）与 missing 态 */
+.bda-search button { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin-right: -4px; padding: 0; border: 0; border-radius: 6px; background: none; color: inherit; cursor: pointer; }
+.bda-section-title { margin: 0 0 12px; font-size: 13px; font-weight: 400; line-height: 20px; color: var(--dsw-alias-label-tertiary); display: flex; align-items: center; justify-content: space-between; }
+.bda-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(106px, 1fr)); gap: 12px; margin: 0 0 32px; padding: 0; list-style: none; }
+.bda-tile { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.bda-tile-art { position: relative; display: flex; align-items: center; justify-content: center; aspect-ratio: 7/5; border-radius: 14px; overflow: hidden; background: color-mix(in srgb, var(--bda-tint) 22%, var(--dsw-alias-bg-base)); color: color-mix(in srgb, var(--bda-tint) 78%, var(--dsw-alias-label-primary)); transition: background-color .15s; }
+.bda-tile:hover .bda-tile-art { background: color-mix(in srgb, var(--bda-tint) 34%, var(--dsw-alias-bg-base)); }
+.bda-tile-squiggle { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .28; }
+.bda-tile-label { padding-left: 2px; font-size: 13px; line-height: 18px; }
+.bda-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; margin: 0; padding: 0; list-style: none; }
+.bda-skeleton-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; }
+.bda-skel-card { height: 196px; border-radius: 14px; background: var(--dsw-alias-bg-skeleton); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+.bda-item { position: relative; min-width: 0; }
+.bda-card { display: flex; flex-direction: column; width: 100%; padding: 0; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; overflow: hidden; background: var(--dsw-alias-bg-base); color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background-color .15s; }
+.bda-item:hover .bda-card { background: var(--dsw-alias-interactive-bg-hover); }
+.bda-card:disabled { cursor: default; }
+.bda-preview { position: relative; display: block; width: 100%; aspect-ratio: 2/1; overflow: hidden; background: color-mix(in srgb, var(--bda-tint) 16%, var(--dsw-alias-bg-base)); }
+.bda-thumb { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
 .bda-live { position:absolute; inset:0; width:1280px; height:800px; transform-origin:0 0; border:0; background:transparent; pointer-events:none; opacity:0; transition:opacity .35s; }
 .bda-live.on { opacity:1; }
 .bda-item.bda-missing .bda-card, .bda-item.bda-missing .bda-row { opacity:.55; }
-.bda-missing-badge { position:absolute; left:8px; top:8px; z-index:3; font-size:11px; line-height:16px; padding:2px 8px; border-radius:999px; background:var(--dsw-alias-state-error-primary, #c0392b); color:#fff; }
+.bda-missing-badge { position:absolute; left:8px; top:8px; z-index:3; font-size:11px; line-height:16px; padding:2px 8px; border-radius:999px; background:var(--dsw-alias-state-error-primary); color:#fff; }
+.bda-warn-badge { position:absolute; left:8px; top:8px; z-index:3; font-size:11px; line-height:16px; padding:2px 8px; border-radius:999px; background:var(--dsw-alias-state-warn-primary); color:#fff; }
+.bda-sheet { position: absolute; left: 12%; right: 12%; top: 13%; bottom: -8px; border-radius: 8px 8px 0 0; overflow: hidden; background: var(--dsw-alias-bg-base); box-shadow: 0 0 0 .5px var(--dsw-alias-border-l2), 0 6px 18px -8px rgba(0,0,0,.28); transition: transform .2s; }
+.bda-item:hover .bda-sheet { transform: translateY(-3px); }
+.bda-slide, .bda-film, .bda-paper { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 14px 16px; overflow: hidden; }
+.bda-paper-title, .bda-film-title { font-size: 12px; font-weight: 600; line-height: 1.3; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bda-line { margin-top: auto; width: 48%; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--bda-tint) 60%, var(--dsw-alias-bg-base)); }
+.bda-boards, .bda-swatches, .bda-kpis { display: flex; gap: 6px; margin-top: auto; }
+.bda-board { flex: 1; height: 28px; border-radius: 4px; border: 1px dashed var(--dsw-alias-border-l1); background: var(--dsw-alias-interactive-bg-hover); }
+.bda-swatch { width: 16px; height: 16px; border-radius: 50%; background: var(--bda-tint); }
+.bda-swatch:nth-child(2) { opacity: .6; }
+.bda-swatch:nth-child(3) { opacity: .3; }
+.bda-kpi { flex: 1; height: 24px; border-radius: 4px; background: var(--dsw-alias-interactive-bg-hover); border: .5px solid var(--dsw-alias-border-l2); }
+.bda-film { background: #111; color: #fff; align-items: center; justify-content: center; }
+.bda-film-title { color: #eee; width: 100%; text-align: center; margin-bottom: 4px; }
+.bda-film-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: var(--bda-tint); }
+.bda-busy { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; background: rgba(0,0,0,.6); color: #fff; font-size: 12px; font-weight: 500; }
+.bda-spinner { width: 12px; height: 12px; border: 1.5px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; display:inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.bda-info { display: flex; align-items: center; gap: 10px; padding: 10px 14px 12px; min-width: 0; }
+.bda-glyph { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; color: var(--bda-tint); }
+.bda-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.bda-name { font-size: 13px; font-weight: 500; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bda-meta { font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary); margin-top: 1px; }
+.bda-actions { position: absolute; top: 8px; right: 8px; display: flex; align-items: center; gap: 4px; opacity: 0; transition: opacity .15s; }
+.bda-item:hover .bda-actions, .bda-item[data-menu="true"] .bda-actions, .bda-item:focus-within .bda-actions { opacity: 1; }
+.bda-act { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: var(--dsw-alias-bg-base); box-shadow: 0 1px 3px rgba(0,0,0,.15); color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.bda-act[data-on=true] { opacity: 1; color: var(--dsw-alias-state-business-primary); }
+.bda-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.bda-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 12px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.bda-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.bda-row .bda-name { flex: 1; min-width: 0; }
+.bda-row .bda-meta { flex: none; margin-left: 16px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+.bda-row-tools { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 4px; }
+.bda-menu { position: fixed; z-index: 1000; min-width: 210px; padding: 6px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-base); box-shadow: 0 8px 28px -6px rgba(0,0,0,.28); font-size: 14px; }
+.bda-menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 5px 10px; border: 0; border-radius: 8px; background: none; color: var(--dsw-alias-label-primary); font: inherit; text-align: left; white-space: nowrap; cursor: pointer; }
+.bda-menu-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.bda-menu-item[data-danger=true] { color: var(--dsw-alias-state-error-primary); }
+.bda-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.bda-menu-value, .bda-menu-count { margin-left: 16px; color: var(--dsw-alias-label-tertiary); }
+.bda-menu-key { margin-left: 20px; color: var(--dsw-alias-label-tertiary); font: inherit; font-size: 12px; }
+.bda-menu-rule { height: .5px; margin: 6px 4px; background: var(--dsw-alias-border-l2); }
+.bda-menu-row { position: relative; }
+.bda-submenu { position: absolute; left: calc(100% + 8px); top: -6px; z-index: 1001; min-width: 190px; max-height: 360px; overflow: auto; padding: 6px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-base); box-shadow: 0 8px 28px -6px rgba(0,0,0,.28); display: none; }
+.bda-menu-row:hover .bda-submenu { display: block; }
+.bda-check { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; color: transparent; }
+.bda-check[data-on=true] { border-color: var(--dsw-alias-state-business-primary); background: var(--dsw-alias-state-business-primary); color: #fff; }
+.bda-tick { flex: none; margin-left: 16px; color: var(--dsw-alias-state-business-primary); }
+.bda-scrim { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,.36); }
+.bda-dialog { width: min(520px, 100%); max-height: 88vh; overflow: auto; padding: 20px; border-radius: 16px; background: var(--dsw-alias-bg-base); box-shadow: 0 18px 48px -12px rgba(0,0,0,.4); }
+.bda-dialog h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; line-height: 24px; }
+.bda-dialog p { margin: 0 0 14px; color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 1.65; max-width: 36em; }
+.bda-dialog input[type=text], .bda-dialog input:not([type]) { width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: none; color: var(--dsw-alias-label-primary); font: inherit; outline: none; margin-bottom: 14px; }
+.bda-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.bda-btn { height: 34px; padding: 0 14px; border: 0; border-radius: 9px; background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.bda-btn:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 12%, var(--dsw-alias-bg-base)); }
+.bda-btn[data-primary=true] { background: var(--dsw-alias-state-business-primary); color: #fff; }
+.bda-btn[data-danger=true] { border: 1px solid var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, var(--dsw-alias-bg-base)); color: var(--dsw-alias-state-error-primary); }
+.bda-toast { position: fixed; left: 50%; bottom: 24px; z-index: 1200; display: flex; align-items: center; gap: 10px; max-width: min(560px, calc(100% - 32px)); padding: 9px 12px 9px 14px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-base); box-shadow: 0 8px 28px -6px rgba(0,0,0,.28); transform: translateX(-50%); font-size: 13px; }
+.bda-toast-undo { padding: 2px 8px; border: 0; border-radius: 6px; background: none; color: var(--dsw-alias-state-business-primary); font: inherit; font-weight: 500; cursor: pointer; }
+.bda-toast-close { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; background: none; color: var(--dsw-alias-label-tertiary); cursor: pointer; }
+.bda-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 48px 20px; text-align: center; color: var(--dsw-alias-label-tertiary); }
 #examples { grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); }
 .bda-example { display:flex; flex-direction:column; gap:10px; padding:16px; border:1px solid var(--dsw-alias-border-l2); border-radius:14px; }
 .bda-example h3 { margin:0; font-size:14px; font-weight:500; }
 .bda-example p { margin:0; font-size:12px; line-height:1.6; color:var(--dsw-alias-label-secondary); }
 .bda-example-skill { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--dsw-alias-label-tertiary); }
 .bda-example-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:auto; }
-.bda-example-preview { overflow:hidden; width:100%; background:var(--dsw-alias-bg-skeleton); border-radius:8px; }
+.bda-example-preview { overflow:hidden; width:100%; background:var(--dsw-alias-bg-skeleton); border-radius:8px; margin-bottom:12px; }
 .bda-example-preview iframe { width:880px; height:560px; border:0; transform-origin:top left; }
-.bda-example-skeleton { padding:24px; background:var(--dsw-alias-bg-skeleton); border-radius:8px; }
 .bda-recipe-desc { font-size:12px; color:var(--dsw-alias-label-tertiary); line-height:1.5; }
-/* CJK 排版（吸收 guizang T4）：弹窗正文行长 ≤36em、行距 1.75；T3 中西文间距由下方原生属性渐进实施 */
-.bda-scrim p { max-width:36em; line-height:1.75; }
-
-/* 主题覆盖链：URL ?scheme= > localStorage > 宿主 settings.theme > 系统 prefers-color-scheme。
-   color-scheme 属性驱动上方所有 light-dark() 取值翻转；宿主主题由服务端首帧注入。 */
-html[data-scheme=dark] { color-scheme: dark; }
-html[data-scheme=light] { color-scheme: light; }
-
-/* 中西文间距渐进增强：Chromium 支持情况见 cjk-typography.md T3。
-   不支持的浏览器保持现状（0.25em 方案文档化但不注入全局 letter-spacing）。 */
-@supports (text-autospace: normal) or (text-spacing-trim: space-all) {
-  .bda-scrim p,
-  .bda-name,
-  .bda-meta {
-    text-autospace: normal;
-    text-spacing-trim: space-all;
-  }
-}
-
-.bda-section-title {
-  margin: 0 0 12px;
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 20px;
-  color: var(--dsw-alias-label-tertiary);
-}
-.bda-tiles {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
-  gap: 14px;
-  margin: 0 0 36px;
-  padding: 0;
-  list-style: none;
-}
-.bda-tile {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.bda-tile-art {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  aspect-ratio: 7/5;
-  border-radius: 14px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--bda-tint) 24%, var(--dsw-alias-bg-base));
-  color: color-mix(in srgb, var(--bda-tint) 78%, var(--dsw-alias-label-primary));
-  transition: background-color .15s;
-}
-.bda-tile:hover .bda-tile-art {
-  background: color-mix(in srgb, var(--bda-tint) 34%, var(--dsw-alias-bg-base));
-}
-.bda-tile:focus-visible { outline: none; }
-.bda-tile:focus-visible .bda-tile-art {
-  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
-  outline-offset: 2px;
-}
-.bda-tile-squiggle {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: .28;
-}
-.bda-tile-label {
-  padding-left: 2px;
-  font-size: 14px;
-  line-height: 20px;
-}
-.bda-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 20px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.bda-item {
-  position: relative;
-  min-width: 0;
-}
-.bda-card {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  padding: 0;
-  border: .5px solid var(--dsw-alias-border-l2);
-  border-radius: 14px;
-  overflow: hidden;
-  background: var(--dsw-alias-bg-base);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color .15s;
-}
-.bda-item:hover .bda-card {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-.bda-card:disabled { cursor: progress; }
-.bda-card:focus-visible, .bda-row:focus-visible {
-  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
-  outline-offset: 2px;
-}
-.bda-preview {
-  position: relative;
-  display: block;
-  width: 100%;
-  aspect-ratio: 2/1;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--bda-tint) 16%, var(--dsw-alias-bg-base));
-}
-.bda-thumb { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-.bda-sheet {
-  position: absolute;
-  left: 12%;
-  right: 12%;
-  top: 13%;
-  bottom: -8px;
-  border-radius: 8px 8px 0 0;
-  overflow: hidden;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: 0 0 0 .5px var(--dsw-alias-border-l2), 0 6px 18px -8px rgba(0,0,0,.28);
-  transition: transform .2s;
-}
-.bda-item:hover .bda-sheet { transform: translateY(-3px); }
-.bda-slide, .bda-film, .bda-paper {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  padding: 14px 16px;
-  overflow: hidden;
-}
-.bda-paper-title, .bda-film-title {
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.3;
-  color: var(--dsw-alias-label-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.bda-line {
-  margin-top: auto;
-  width: 48%;
-  height: 4px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--bda-tint) 60%, var(--dsw-alias-bg-base));
-}
-.bda-boards, .bda-swatches, .bda-kpis {
-  display: flex;
-  gap: 6px;
-  margin-top: auto;
-}
-.bda-board {
-  flex: 1;
-  height: 28px;
-  border-radius: 4px;
-  border: 1px dashed var(--dsw-alias-border-l1);
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-.bda-swatch {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--bda-tint);
-}
-.bda-swatch:nth-child(2) { opacity: .6; }
-.bda-swatch:nth-child(3) { opacity: .3; }
-.bda-kpi {
-  flex: 1;
-  height: 24px;
-  border-radius: 4px;
-  background: var(--dsw-alias-interactive-bg-hover);
-  border: .5px solid var(--dsw-alias-border-l2);
-}
-.bda-film {
-  background: #111;
-  color: #fff;
-  align-items: center;
-  justify-content: center;
-}
-.bda-film-title {
-  color: #eee;
-  width: 100%;
-  text-align: center;
-  margin-bottom: 4px;
-}
-.bda-film-bar {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 4px;
-  background: var(--bda-tint);
-}
-.bda-busy {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  background: rgba(0,0,0,.6);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 500;
-}
-.bda-spinner {
-  width: 12px;
-  height: 12px;
-  border: 1.5px solid currentColor;
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: spin .7s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-.bda-info {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px 12px;
-  min-width: 0;
-}
-.bda-glyph {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  color: var(--bda-tint);
-}
-.bda-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.bda-name {
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.bda-meta {
-  font-size: 12px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-tertiary);
-  margin-top: 1px;
-}
-.bda-actions {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity .15s;
-}
-.bda-item:hover .bda-actions, .bda-item[data-menu="true"] .bda-actions, .bda-item:focus-within .bda-actions {
-  opacity: 1;
-}
-.bda-act {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: 7px;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: 0 1px 3px rgba(0,0,0,.15);
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-}
-.bda-act:hover {
-  background: var(--dsw-alias-bg-base);
-  color: var(--dsw-alias-label-primary);
-  filter: brightness(0.95);
-}
-.bda-act[data-on=true] {
-  opacity: 1;
-  color: var(--dsw-alias-state-business-primary);
-}
-.bda-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.bda-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 8px 12px;
-  border: .5px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  background: var(--dsw-alias-bg-base);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color .15s;
-}
-.bda-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.bda-row .bda-name { flex: 1; min-width: 0; }
-.bda-row .bda-meta { flex: none; margin-left: 16px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
-.bda-row-tools {
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.bda-list .bda-act {
-  background: transparent;
-  box-shadow: none;
-}
-.bda-list .bda-act:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-.bda-list .bda-item:hover .bda-act, .bda-list .bda-act[data-on="true"] {
-  opacity: 1;
-}
-.bda-menu {
-  position: fixed;
-  z-index: 1000;
-  min-width: 200px;
-  padding: 6px;
-  border: .5px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: 0 8px 28px -6px rgba(0,0,0,.28);
-  font-size: 14px;
-}
-.bda-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 34px;
-  padding: 5px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.bda-menu-item:hover, .bda-menu-item:focus-visible, .bda-menu-item[aria-expanded=true] {
-  background: var(--dsw-alias-interactive-bg-hover);
-  outline: none;
-}
-.bda-menu-item[data-danger=true] { color: var(--dsw-alias-state-error-primary); }
-.bda-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.bda-menu-value { margin-left: 16px; color: var(--dsw-alias-label-tertiary); }
-.bda-menu-count { margin-left: 16px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
-.bda-menu-key { margin-left: 20px; color: var(--dsw-alias-label-tertiary); font: inherit; font-size: 12px; }
-.bda-menu-rule { height: .5px; margin: 6px 4px; background: var(--dsw-alias-border-l2); }
-.bda-menu-chev { margin-left: 6px; color: var(--dsw-alias-label-tertiary); }
-.bda-menu-row { position: relative; }
-.bda-submenu {
-  position: absolute;
-  left: calc(100% + 8px);
-  top: -6px;
-  z-index: 1001;
-  min-width: 190px;
-  padding: 6px;
-  border: .5px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: 0 8px 28px -6px rgba(0,0,0,.28);
-  display: none;
-}
-.bda-menu-row:hover .bda-submenu { display: block; }
-.bda-check {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 5px;
-  color: transparent;
-}
-.bda-check[data-on=true] {
-  border-color: var(--dsw-alias-state-business-primary);
-  background: var(--dsw-alias-state-business-primary);
-  color: #fff;
-}
-.bda-tick { flex: none; margin-left: 16px; color: var(--dsw-alias-state-business-primary); }
-.bda-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 1100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: rgba(0,0,0,.36);
-}
-.bda-dialog {
-  width: min(420px, 100%);
-  padding: 20px;
-  border-radius: 16px;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: 0 18px 48px -12px rgba(0,0,0,.4);
-}
-.bda-dialog h2 {
-  margin: 0 0 12px;
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 24px;
-  overflow-wrap: anywhere;
-}
-.bda-dialog p {
-  margin: 0 0 16px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 13px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-.bda-dialog input {
-  box-sizing: border-box;
-  width: 100%;
-  height: 38px;
-  padding: 0 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  background: none;
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  outline: none;
-  margin-bottom: 16px;
-}
-.bda-dialog input:focus { border-color: var(--dsw-alias-state-business-primary); }
-.bda-dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.bda-btn {
-  height: 34px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-}
-.bda-btn:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 12%, var(--dsw-alias-bg-base)); }
-.bda-btn:disabled { color: var(--dsw-alias-label-caption); cursor: default; }
-.bda-btn[data-primary=true] { background: var(--dsw-alias-state-business-primary); color: #fff; }
-.bda-btn[data-danger=true] {
-  border: 1px solid var(--dsw-alias-state-error-primary);
-  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, var(--dsw-alias-bg-base));
-  color: var(--dsw-alias-state-error-primary);
-}
-.bda-toast {
-  position: fixed;
-  left: 50%;
-  bottom: 24px;
-  z-index: 1200;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: min(560px, calc(100% - 32px));
-  padding: 9px 12px 9px 14px;
-  border: .5px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-base);
-  box-shadow: 0 8px 28px -6px rgba(0,0,0,.28);
-  transform: translateX(-50%);
-  font-size: 13px;
-}
-.bda-toast[data-kind=error] { color: var(--dsw-alias-state-error-primary); }
-.bda-toast-undo {
-  padding: 2px 8px;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  color: var(--dsw-alias-state-business-primary);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-}
-.bda-toast-undo:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.bda-toast-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: none;
-  color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
-}
-.bda-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 56px 20px;
-  text-align: center;
-  color: var(--dsw-alias-label-tertiary);
-}
-.bda-empty h2 { margin: 0; font-size: 15px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
-.bda-empty p { margin: 0; max-width: 420px; font-size: 13px; line-height: 1.6; }
-/* 全屏 iframe 编辑器视图 */
-#editorView {
-  display: flex;
-  flex-direction: column;
-  width: 100vw;
-  height: 100vh;
-  position: absolute;
-  inset: 0;
-  z-index: 500;
-  background: var(--dsw-alias-bg-base);
-}
-.editor-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 16px;
-  border-bottom: .5px solid var(--dsw-alias-border-l2);
-  background: var(--dsw-alias-bg-base);
-  flex: none;
-}
-.editor-bar .title {
-  font-size: 13px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-#frame {
-  flex: 1;
-  border: 0;
-  width: 100%;
-  height: 100%;
-  background: var(--dsw-alias-bg-base);
-}
+#editorView { display: flex; flex-direction: column; width: 100vw; height: 100vh; position: absolute; inset: 0; z-index: 500; background: var(--dsw-alias-bg-base); }
+.editor-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: .5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-base); flex: none; }
+.editor-bar .title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.l1-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 16px; font-size: 12px; background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, var(--dsw-alias-bg-base)); border-bottom: .5px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); }
+#frame { flex: 1; border: 0; width: 100%; height: 100%; background: var(--dsw-alias-bg-base); }
+.runtime-wait { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 32px; text-align: center; }
+.runtime-bar-wrap { width: min(420px, 90%); height: 8px; border-radius: 999px; background: var(--dsw-alias-bg-skeleton); overflow: hidden; }
+.runtime-bar-fill { height: 100%; background: var(--dsw-alias-state-business-primary); transition: width .2s ease; }
+.type-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; margin-bottom: 8px; }
+.type-row-meta { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
 .hidden { display: none !important; }
 </style>
 </head>
@@ -1624,21 +1751,22 @@ html[data-scheme=light] { color-scheme: light; }
           <span class="bda-ws" id="wsLabel"></span>
         </div>
         <div class="bda-tools">
-          <button type="button" class="bda-btn" id="languageBtn" data-i18n-title="language" data-i18n-label="language" title="${text('language')}" aria-label="${text('language')}">${text('languageButton')}</button>
+          <button type="button" class="bda-btn" id="typesBtn" data-i18n="typesBtn">${text('typesBtn')}</button>
+          <button type="button" class="bda-btn" id="languageBtn" data-i18n-title="language" title="${text('language')}">${text('languageButton')}</button>
           <div class="bda-search">
             <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
             <input id="q" data-i18n-placeholder="searchPlaceholder" placeholder="${text('searchPlaceholder')}" data-i18n-label="search" aria-label="${text('search')}">
-            <button id="clearSearch" class="hidden" data-i18n-title="clearSearch" title="${text('clearSearch')}" data-i18n-label="clearSearch" aria-label="${text('clearSearch')}">
+            <button id="clearSearch" class="hidden" data-i18n-title="clearSearch" title="${text('clearSearch')}">
               <svg viewBox="0 0 16 16" width="12" height="12" stroke="currentColor" stroke-width="1.3"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg>
             </button>
           </div>
-          <button class="bda-tool" id="filterBtn" data-i18n-title="sortFilter" title="${text('sortFilter')}" data-i18n-label="sortFilter" aria-label="${text('sortFilter')}">
+          <button class="bda-tool" id="filterBtn" data-i18n-title="sortFilter" title="${text('sortFilter')}">
             <svg viewBox="0 0 16 16" width="16" height="16" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3"/></svg>
           </button>
-          <button class="bda-tool" id="viewModeBtn" data-i18n-title="switchView" title="${text('switchView')}" data-i18n-label="switchView" aria-label="${text('switchView')}">
+          <button class="bda-tool" id="viewModeBtn" data-i18n-title="switchView" title="${text('switchView')}">
             <svg id="viewModeIcon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"></svg>
           </button>
-          <button class="bda-tool" id="reloadBtn" data-i18n-title="refresh" title="${text('refresh')}" data-i18n-label="refresh" aria-label="${text('refresh')}">
+          <button class="bda-tool" id="reloadBtn" data-i18n-title="refresh" title="${text('refresh')}">
             <svg viewBox="0 0 16 16" width="15" height="15" stroke="currentColor" stroke-width="1.3" fill="none"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9L14 6m0-4v4h-4"/></svg>
           </button>
         </div>
@@ -1654,7 +1782,9 @@ html[data-scheme=light] { color-scheme: light; }
       <ul class="bda-tiles" id="recipes" style="grid-template-columns:repeat(auto-fill,minmax(230px,1fr))"></ul>
 
       <div class="bda-section-title" id="listHeading" data-i18n="allWorks">${text('allWorks')}</div>
-      <div id="container"></div>
+      <div id="container">
+        <div class="bda-skeleton-grid"><div class="bda-skel-card"></div><div class="bda-skel-card"></div><div class="bda-skel-card"></div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1665,6 +1795,26 @@ html[data-scheme=light] { color-scheme: light; }
     <span class="title" id="editorTitle"></span>
     <button class="bda-btn" id="popBtn" data-i18n="popOut">${text('popOut')}</button>
   </div>
+  <div id="l1Banner" class="l1-banner hidden">
+    <span data-i18n="l1Banner">${text('l1Banner')}</span>
+    <button type="button" class="bda-btn" id="copyCommentsBtn" data-i18n="l1CopyComments">${text('l1CopyComments')}</button>
+  </div>
+  <div id="runtimeWait" class="runtime-wait hidden">
+    <div style="display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600">
+      <span class="bda-spinner"></span>
+      <span id="runtimeWaitTitle">${text('runtimePreparing')}</span>
+    </div>
+    <div class="runtime-bar-wrap"><div class="runtime-bar-fill" id="runtimeWaitBar" style="width:0%"></div></div>
+    <p id="runtimeWaitText" style="font-size:13px;color:var(--dsw-alias-label-secondary)"></p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">
+      <button type="button" class="bda-btn" data-primary="true" id="runtimeRetryBtn">${text('runtimeRetry')}</button>
+      <label class="bda-btn" style="cursor:pointer">${text('runtimeImportOffline')}<input type="file" id="runtimeFileInput" accept=".tgz,.tar.gz" class="hidden"></label>
+    </div>
+    <div style="display:flex;gap:8px;width:min(460px,95%);margin-top:4px">
+      <input type="text" id="runtimePathInput" placeholder="${text('runtimeImportPathPlaceholder')}" style="flex:1;height:34px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:none;color:inherit">
+      <button type="button" class="bda-btn" id="runtimePathBtn">${text('runtimeImportBtn')}</button>
+    </div>
+  </div>
   <iframe id="frame" allow="clipboard-read; clipboard-write"></iframe>
 </div>
 
@@ -1672,15 +1822,13 @@ html[data-scheme=light] { color-scheme: light; }
 <div id="toast" class="hidden"></div>
 <div id="menuLayer"></div>
 
-<script>
+<script type="module">
+import { embedArtifact } from '/vendor/harness-embed.mjs';
+
 const STR = ${JSON.stringify(GALLERY_STR).replace(/</g, '\\u003c')};
 const INITIAL_LANG = ${JSON.stringify(initialLang)};
-function readPreference(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-function writePreference(key, value) {
-  try { localStorage.setItem(key, value); } catch { /* Storage may be disabled in embedded browsers. */ }
-}
+function readPreference(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function writePreference(key, value) { try { localStorage.setItem(key, value); } catch {} }
 const requestedLang = new URLSearchParams(location.search).get('lang');
 const rememberedLang = readPreference('ps_lang');
 let lang = Object.hasOwn(STR, requestedLang) ? requestedLang : Object.hasOwn(STR, rememberedLang) ? rememberedLang : INITIAL_LANG;
@@ -1692,12 +1840,17 @@ function t(key, values = {}) {
 }
 function skillText(id, field) { return STR[lang]['skill.' + id + '.' + field] ?? id; }
 function exampleText(example, field) { return STR[lang]['example.' + example.id + '.' + field] ?? example[field]; }
-// 图标库与色彩
+function recipeText(recipe, field) { return STR[lang]['recipe.' + recipe.id + '.' + field] ?? recipe[field]; }
 const TINTS = ${JSON.stringify(TINTS)};
 const SKILLS_CONFIG = ${JSON.stringify(SKILLS)};
 const SKILL_MAP = Object.fromEntries(SKILLS_CONFIG.map(s => [s.id, s]));
 const RECIPES = ${JSON.stringify(RECIPES)};
-// 主题覆盖链（尽早执行避免闪色）：URL ?scheme= > 手动记忆 > 宿主注入 > 系统偏好
+const OFFICIAL_EXAMPLES = ${JSON.stringify(OFFICIAL_EXAMPLES).replace(/</g, '\\u003c')};
+const EXAMPLE_TEMPLATES = ${JSON.stringify(Object.fromEntries(Object.keys(EXAMPLE_TEMPLATES).map((id) => [id, true])))};
+
+function resolvedScheme() {
+  return document.documentElement.dataset.scheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+}
 (() => {
   try {
     const q = new URLSearchParams(location.search).get('scheme');
@@ -1709,12 +1862,8 @@ const RECIPES = ${JSON.stringify(RECIPES)};
     if (resolved) document.documentElement.dataset.scheme = resolved;
   } catch {}
 })();
-const OFFICIAL_EXAMPLES = ${JSON.stringify(OFFICIAL_EXAMPLES).replace(/</g, '\\u003c')};
-const EXAMPLE_TEMPLATES = ${JSON.stringify(Object.fromEntries(Object.keys(EXAMPLE_TEMPLATES).map((id) => [id, true])))};
 
 const SVG_ICONS = {
-  search: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>',
-  filter: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3"/></svg>',
   grid: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>',
   list: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M5.75 4h7.75M5.75 8h7.75M5.75 12h7.75"/><path d="M2.5 4h.01M2.5 8h.01M2.5 12h.01" stroke-width="1.8"/></svg>',
   pin: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M9.75 2.25 13.75 6.25M10.75 3.25 7 6.25 4.5 6.5 9.5 11.5 9.75 9 12.75 5.25M7 9l-4 4"/></svg>',
@@ -1732,23 +1881,26 @@ function typeIconSvg(skill, size = 18) {
   const p = 'stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"';
   let inner = '';
   switch (skill) {
-    case 'claude-slides':
-      inner = '<path d="M2.75 3.5h14.5M4 3.5v8.25a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V3.5M7.25 16.75 10 12.75l2.75 4" ' + p + '/>';
-      break;
-    case 'claude-design':
-      inner = '<path d="M10 2.75a7.25 7.25 0 1 0 0 14.5c1.1 0 1.75-.8 1.75-1.7 0-.5-.2-.9-.45-1.25-.25-.35-.45-.7-.45-1.15 0-.95.75-1.65 1.7-1.65h1.6a3.1 3.1 0 0 0 3.1-3.1c0-3.1-3.2-5.65-7.25-5.65Z" ' + p + '/><circle cx="6.4" cy="9.4" r=".9" fill="currentColor"/><circle cx="8.8" cy="6.3" r=".9" fill="currentColor"/><circle cx="12.5" cy="6.8" r=".9" fill="currentColor"/>';
-      break;
-    case 'claude-design-system':
-      inner = '<circle cx="6.5" cy="6.5" r="3.25" ' + p + '/><circle cx="13.5" cy="6.5" r="3.25" ' + p + '/><circle cx="10" cy="13" r="3.25" ' + p + '/>';
-      break;
-    case 'claude-dashboard':
-      inner = '<rect x="2.75" y="10" width="4.5" height="7.25" rx="1" ' + p + '/><rect x="7.75" y="2.75" width="4.5" height="14.5" rx="1" ' + p + '/><rect x="12.75" y="7" width="4.5" height="10.25" rx="1" ' + p + '/>';
-      break;
-    case 'claude-motion':
-      inner = '<rect x="2.75" y="4" width="14.5" height="12" rx="2" ' + p + '/><path d="m8.5 7.75 4 2.25-4 2.25v-4.5Z" ' + p + '/>';
-      break;
+    case 'slides': case 'claude-slides':
+      inner = '<path d="M2.75 3.5h14.5M4 3.5v8.25a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V3.5M7.25 16.75 10 12.75l2.75 4" ' + p + '/>'; break;
+    case 'design': case 'claude-design':
+      inner = '<path d="M10 2.75a7.25 7.25 0 1 0 0 14.5c1.1 0 1.75-.8 1.75-1.7 0-.5-.2-.9-.45-1.25-.25-.35-.45-.7-.45-1.15 0-.95.75-1.65 1.7-1.65h1.6a3.1 3.1 0 0 0 3.1-3.1c0-3.1-3.2-5.65-7.25-5.65Z" ' + p + '/><circle cx="6.4" cy="9.4" r=".9" fill="currentColor"/><circle cx="8.8" cy="6.3" r=".9" fill="currentColor"/><circle cx="12.5" cy="6.8" r=".9" fill="currentColor"/>'; break;
+    case 'design-system': case 'claude-design-system':
+      inner = '<circle cx="6.5" cy="6.5" r="3.25" ' + p + '/><circle cx="13.5" cy="6.5" r="3.25" ' + p + '/><circle cx="10" cy="13" r="3.25" ' + p + '/>'; break;
+    case 'whiteboard':
+      inner = '<rect x="2.75" y="3.25" width="14.5" height="11.5" rx="2" ' + p + '/><path d="M6 17h8M6.5 8.5l2.5 2 4.5-4" ' + p + '/>'; break;
+    case 'sheets':
+      inner = '<rect x="3" y="3" width="14" height="14" rx="2" ' + p + '/><path d="M3 7.5h14M3 12h14M8 7.5V17M13 7.5V17" ' + p + '/>'; break;
+    case 'data': case 'claude-dashboard':
+      inner = '<rect x="2.75" y="10" width="4.5" height="7.25" rx="1" ' + p + '/><rect x="7.75" y="2.75" width="4.5" height="14.5" rx="1" ' + p + '/><rect x="12.75" y="7" width="4.5" height="10.25" rx="1" ' + p + '/>'; break;
+    case 'docs':
+      inner = '<path d="M5 2.75h7.5L16 6.25v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-13.5a1 1 0 0 1 1-1Z" ' + p + '/><path d="M7 9.5h6M7 13h4" ' + p + '/>'; break;
+    case 'motion': case 'claude-motion':
+      inner = '<rect x="2.75" y="4" width="14.5" height="12" rx="2" ' + p + '/><path d="m8.5 7.75 4 2.25-4 2.25v-4.5Z" ' + p + '/>'; break;
+    case 'page':
+      inner = '<rect x="2.75" y="3.5" width="14.5" height="13" rx="2" ' + p + '/><path d="M2.75 7.25h14.5M8.5 11l-2 2 2 2M11.5 11l2 2-2 2" ' + p + '/>'; break;
     default:
-      inner = '<rect x="3" y="3" width="14" height="14" rx="2" ' + p + '/>';
+      inner = '<polygon points="10,2.5 16.5,6.5 16.5,13.5 10,17.5 3.5,13.5 3.5,6.5" ' + p + '/>';
   }
   return '<svg viewBox="0 0 20 20" width="' + size + '" height="' + size + '" fill="none" style="display:block;flex:none">' + inner + '</svg>';
 }
@@ -1756,25 +1908,19 @@ function typeIconSvg(skill, size = 18) {
 function drawnHtml(skill, title) {
   const escTitle = esc(title);
   switch (skill) {
-    case 'claude-slides':
-      return '<div class="bda-slide"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-line"></div></div>';
-    case 'claude-design':
-      return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-boards"><div class="bda-board"></div><div class="bda-board"></div></div></div>';
-    case 'claude-design-system':
-      return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-swatches"><span class="bda-swatch"></span><span class="bda-swatch"></span><span class="bda-swatch"></span></div></div>';
-    case 'claude-dashboard':
-      return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-kpis"><span class="bda-kpi"></span><span class="bda-kpi"></span></div></div>';
-    case 'claude-motion':
-      return '<div class="bda-film"><div class="bda-film-title">' + escTitle + '</div><svg viewBox="0 0 20 20" width="22" height="22" style="display:block;margin:auto"><path d="M7 5.5v9l7.5-4.5L7 5.5Z" fill="currentColor"/></svg><div class="bda-film-bar"></div></div>';
-    default:
-      return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div></div>';
+    case 'slides': return '<div class="bda-slide"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-line"></div></div>';
+    case 'design': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-boards"><div class="bda-board"></div><div class="bda-board"></div></div></div>';
+    case 'design-system': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-swatches"><span class="bda-swatch"></span><span class="bda-swatch"></span><span class="bda-swatch"></span></div></div>';
+    case 'data': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-kpis"><span class="bda-kpi"></span><span class="bda-kpi"></span></div></div>';
+    case 'motion': return '<div class="bda-film"><div class="bda-film-title">' + escTitle + '</div><svg viewBox="0 0 20 20" width="22" height="22" style="display:block;margin:auto"><path d="M7 5.5v9l7.5-4.5L7 5.5Z" fill="currentColor"/></svg><div class="bda-film-bar"></div></div>';
+    case 'sheets': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-kpis"><span class="bda-kpi"></span><span class="bda-kpi"></span><span class="bda-kpi"></span></div></div>';
+    case 'whiteboard': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-boards"><div class="bda-board"></div><div class="bda-board"></div></div></div>';
+    case 'docs': return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-line" style="width:72%"></div></div>';
+    default: return '<div class="bda-paper"><div class="bda-paper-title">' + escTitle + '</div><div class="bda-line"></div></div>';
   }
 }
 
-function esc(v) {
-  return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
+function esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function ago(iso) {
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return '';
@@ -1784,38 +1930,39 @@ function ago(iso) {
   let unit = 'minute', size = 60;
   for (const [u, s] of steps) if (-seconds >= s) [unit, size] = [u, s];
   let time;
-  try {
-    time = new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' }).format(Math.round(seconds / size), unit);
-  } catch {
-    const key = unit === 'week' ? 'weekUnit' : unit === 'month' ? 'monthUnit' : unit;
-    time = t('relativeFallback', { count: Math.abs(Math.round(seconds / size)), unit: t(key) });
+  try { time = new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' }).format(Math.round(seconds / size), unit); }
+  catch {
+    const unitKey = unit === 'week' ? 'weekUnit' : unit === 'month' ? 'monthUnit' : unit;
+    time = t('relativeFallback', { count: Math.abs(Math.round(seconds / size)), unit: t(unitKey) });
   }
   return t('openedRelative', { time });
 }
 
 function localizedMeta(item) {
   const match = /^(\\d+) /.exec(item.meta || '');
-  const keys = { 'claude-design': 'boards', 'claude-slides': 'pages', 'claude-motion': 'scenes', 'claude-design-system': 'components', 'claude-dashboard': 'sheets' };
+  const keys = { design: 'boards', slides: 'pages', motion: 'scenes', 'design-system': 'components', data: 'sheets', whiteboard: 'elements', sheets: 'worksheets', docs: 'tabs' };
   if (match && keys[item.skill]) return t(keys[item.skill], {count: match[1]});
-  return item.skill === 'claude-dashboard' && item.meta ? t('dashboard') : item.meta || '';
+  if (item.skill === 'data' && item.meta) return t('dashboard');
+  if (item.skill === 'whiteboard' && item.meta) return t('whiteboard');
+  if (item.skill === 'page' && item.meta) return t('freePage');
+  return item.meta || '';
 }
 
-// 客户端状态管理
 let state = {
   artifacts: [],
+  types: [],
+  runtime: null,
+  loadedOnce: false,
   workspaceName: '',
   workspaceRoot: '',
   search: '',
   viewMode: readPreference('ps_view_mode') || 'grid',
-  filters: {
-    sort: 'opened',
-    types: [],
-    date: 'any',
-    sharing: 'any',
-    pinned: false,
-  },
+  filters: { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false },
   openingRoot: null,
 };
+
+let embeddedView = null;
+let pendingWaitItem = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -1824,54 +1971,43 @@ async function api(path, opts) {
 
 function showToast(msg, undoTrashId) {
   const toast = document.getElementById('toast');
-  toast.innerHTML = '<span style="display:inline-flex;align-items:center">' + SVG_ICONS.info + '</span><span class="bda-toast-text">' + esc(msg) + '</span>' +
+  toast.innerHTML = '<span style="display:inline-flex;align-items:center">' + SVG_ICONS.info + '</span><span>' + esc(msg) + '</span>' +
     (undoTrashId ? ('<button type="button" class="bda-toast-undo" id="toastUndoBtn">' + t('undo') + '</button>') : '') +
-    '<button type="button" class="bda-toast-close" id="toastCloseBtn"><svg viewBox="0 0 16 16" width="12" height="12" stroke="currentColor" stroke-width="1.3"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg></button>';
+    '<button type="button" class="bda-toast-close" id="toastCloseBtn">✕</button>';
   toast.className = 'bda-toast';
   document.getElementById('toastCloseBtn').onclick = () => toast.className = 'hidden';
   if (undoTrashId) {
     document.getElementById('toastUndoBtn').onclick = async () => {
       toast.className = 'hidden';
       const r = await api('/api/restore', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ id: undoTrashId }) });
-      if (r.ok) {
-        showToast(t('restored'));
-        await reload();
-      } else {
-        showToast(t('restoreFailed') + (r.error || ''));
-      }
+      showToast(r.ok ? t('restored') : t('restoreFailed') + (r.error || ''));
+      if (r.ok) await reload();
     };
   }
   clearTimeout(toast._timer);
   toast._timer = setTimeout(() => toast.className = 'hidden', undoTrashId ? 10000 : 3500);
 }
 
-function closeDialog() {
-  document.getElementById('dialogScrim').className = 'bda-scrim hidden';
-  document.getElementById('dialogScrim').innerHTML = '';
-}
-
+function closeDialog() { const s = document.getElementById('dialogScrim'); s.className = 'bda-scrim hidden'; s.innerHTML = ''; }
 function openDialog(html) {
-  const scrim = document.getElementById('dialogScrim');
-  scrim.innerHTML = '<div class="bda-dialog">' + html + '</div>';
-  scrim.className = 'bda-scrim';
-  scrim.onclick = (e) => { if (e.target === scrim) closeDialog(); };
+  const s = document.getElementById('dialogScrim');
+  s.innerHTML = '<div class="bda-dialog">' + html + '</div>';
+  s.className = 'bda-scrim';
+  s.onclick = (e) => { if (e.target === s) closeDialog(); };
 }
-
 function closeMenu() {
   document.getElementById('menuLayer').innerHTML = '';
   document.querySelectorAll('.bda-item[data-menu="true"]').forEach(el => el.removeAttribute('data-menu'));
 }
 window.addEventListener('click', (e) => {
-  if (!e.target.closest('.bda-menu') && !e.target.closest('.bda-tool') && !e.target.closest('.bda-act')) {
-    closeMenu();
-  }
+  if (!e.target.closest('.bda-menu') && !e.target.closest('.bda-tool') && !e.target.closest('.bda-act')) closeMenu();
 });
 
-// 筛选与排序算法
 function matchesFilter(item) {
   const q = state.search.trim().toLowerCase();
   if (q) {
-    const hay = (item.title + ' ' + (item.tail || '') + ' ' + item.skill).toLowerCase();
+    const label = (SKILL_MAP[item.skill] ? (skillText(item.skill, 'name') + ' ' + SKILL_MAP[item.skill].nameEn) : (item.typeTitle || item.skill));
+    const hay = (item.title + ' ' + (item.tail || '') + ' ' + item.skill + ' ' + label + ' ' + (item.note || '')).toLowerCase();
     if (!hay.includes(q)) return false;
   }
   if (state.filters.pinned && !item.pinned) return false;
@@ -1883,10 +2019,7 @@ function matchesFilter(item) {
   if (state.filters.date !== 'any') {
     const then = Date.parse(item.openedAt);
     if (!Number.isFinite(then)) return false;
-    const now = Date.now();
-    const day = new Date(now);
-    const today = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
-    const DAY = 86400000;
+    const now = Date.now(), day = new Date(now), today = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime(), DAY = 86400000;
     if (state.filters.date === 'today' && then < today) return false;
     if (state.filters.date === 'yesterday' && (then < today - DAY || then >= today)) return false;
     if (state.filters.date === 'week' && then < now - 7 * DAY) return false;
@@ -1908,32 +2041,27 @@ function getSortedList() {
 }
 
 function isFilterActive() {
-  return state.filters.sort !== 'opened' || state.filters.types.length > 0 ||
-    state.filters.date !== 'any' || state.filters.sharing !== 'any' || state.filters.pinned;
+  return state.filters.sort !== 'opened' || state.filters.types.length > 0 || state.filters.date !== 'any' || state.filters.sharing !== 'any' || state.filters.pinned;
 }
 
-// 渲染磁贴
 function renderTiles() {
-  const ul = document.getElementById('tiles');
-  ul.innerHTML = SKILLS_CONFIG.map(s => {
-    return '<li style="--bda-tint:' + s.tint + '">' +
-      '<button type="button" class="bda-tile" data-skill="' + s.id + '">' +
-      '<span class="bda-tile-art">' +
-      '<svg class="bda-tile-squiggle" viewBox="0 0 140 100" preserveAspectRatio="xMidYMid slice" fill="none" stroke="currentColor" stroke-width="1.1" stroke-dasharray="0 3.2" stroke-linecap="round" aria-hidden="true">' +
-      '<path d="M4 84C20 16 42 98 62 42s38 58 74-28"/>' +
-      '<path d="M6 88C24 22 44 104 66 46s36 56 72-26"/>' +
-      '<path d="M2 80C18 12 40 92 58 38s40 58 76-28"/>' +
-      '</svg>' +
-      typeIconSvg(s.id, 36) +
-      '</span>' +
-      '<span class="bda-tile-label">' + esc(skillText(s.id, 'name')) + '</span>' +
-      '</button>' +
-      '</li>';
-  }).join('');
+  const customEnabled = (state.types || []).filter(tp => !tp.builtin && tp.enabled !== false);
+  const allTiles = [
+    ...SKILLS_CONFIG.map(s => ({ id: s.id, name: skillText(s.id, 'name'), tint: s.tint })),
+    ...customEnabled.map(c => ({ id: c.id, name: c.name || c.title || c.id, tint: c.tint || '#6366f1' })),
+  ];
+  document.getElementById('tiles').innerHTML = allTiles.map(s =>
+    '<li style="--bda-tint:' + esc(s.tint) + '">' +
+    '<button type="button" class="bda-tile" data-skill="' + esc(s.id) + '">' +
+    '<span class="bda-tile-art"><svg class="bda-tile-squiggle" viewBox="0 0 140 100" preserveAspectRatio="xMidYMid slice" fill="none" stroke="currentColor" stroke-width="1.1" stroke-dasharray="0 3.2" stroke-linecap="round"><path d="M4 84C20 16 42 98 62 42s38 58 74-28"/><path d="M6 88C24 22 44 104 66 46s36 56 72-26"/></svg>' +
+    typeIconSvg(s.id, 34) + '</span>' +
+    '<span class="bda-tile-label">' + esc(s.name) + '</span>' +
+    '</button></li>'
+  ).join('');
 }
 
-// 渲染主列表/网格
 function renderItems() {
+  if (!state.loadedOnce) return;
   const container = document.getElementById('container');
   const items = getSortedList();
   const isGrid = state.viewMode === 'grid';
@@ -1943,17 +2071,14 @@ function renderItems() {
   document.getElementById('listHeading').textContent = t('allWorksCount', {count: items.length});
 
   if (!items.length) {
-    container.innerHTML = '<div class="bda-empty">' +
-      SVG_ICONS.info +
+    container.innerHTML = '<div class="bda-empty">' + SVG_ICONS.info +
       '<h2>' + (state.search || isFilterActive() ? t('noMatches') : t('noWorks')) + '</h2>' +
       '<p>' + (state.search || isFilterActive() ? t('clearHint') : t('emptyHint')) + '</p>' +
-      (isFilterActive() ? ('<button type="button" class="bda-btn" id="clearFilterBtn" style="margin-top:12px">' + t('clearFilters') + '</button>') : '') +
-      '</div>';
+      (isFilterActive() ? ('<button type="button" class="bda-btn" id="clearFilterBtn">' + t('clearFilters') + '</button>') : '') + '</div>';
     if (document.getElementById('clearFilterBtn')) {
       document.getElementById('clearFilterBtn').onclick = () => {
         state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false };
-        state.search = '';
-        document.getElementById('q').value = '';
+        state.search = ''; document.getElementById('q').value = '';
         document.getElementById('clearSearch').className = 'hidden';
         renderItems();
       };
@@ -1964,54 +2089,42 @@ function renderItems() {
   if (isGrid) {
     container.innerHTML = '<ul class="bda-grid">' + items.map(it => {
       const isOpening = state.openingRoot === it.root;
-      return '<li class="bda-item' + (it.missing ? ' bda-missing' : '') + '" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + (TINTS[it.skill] || '#888') + '">' +
+      const tint = it.typeMissing ? '#71717a' : (TINTS[it.skill] || '#6366f1');
+      const badge = it.missing ? ('<span class="bda-missing-badge">' + t('missing') + '</span>')
+        : it.typeMissing ? ('<span class="bda-warn-badge">' + t('typeMissingBadge') + ' (' + esc(it.skill) + ')</span>')
+        : it.typeDisabled ? ('<span class="bda-warn-badge">' + t('typeDisabledBadge') + '</span>') : '';
+      return '<li class="bda-item' + (it.missing ? ' bda-missing' : '') + '" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + tint + '">' +
         '<button type="button" class="bda-card" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
-        '<span class="bda-preview">' +
-        '<span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
-        (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + ('" tabindex="-1" sandbox="allow-scripts" title="' + t('projectPreview') + '"></iframe>') : '') +
+        '<span class="bda-preview"><span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
+        (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="' + t('projectPreview') + '"></iframe>' : '') +
         (it.thumb ? '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">' : '') +
-        (it.missing ? ('<span class="bda-missing-badge">' + t('missing') + '</span>') : '') +
+        badge +
         (isOpening ? ('<span class="bda-busy"><span class="bda-spinner"></span>' + t('opening') + '</span>') : '') +
-        '</span>' +
-        '<span class="bda-info">' +
-        '<span class="bda-glyph">' + typeIconSvg(it.skill, 18) + '</span>' +
-        '<span class="bda-text">' +
-        '<span class="bda-name" title="' + esc(it.title) + '">' + esc(it.title) + '</span>' +
+        '</span><span class="bda-info"><span class="bda-glyph">' + typeIconSvg(it.typeMissing ? '__unknown__' : it.skill, 18) + '</span>' +
+        '<span class="bda-text"><span class="bda-name" title="' + esc(it.title) + '">' + esc(it.title) + '</span>' +
         '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + (it.note ? ' · ' + esc(it.note) : '') + '</span>' +
-        '</span>' +
-        '</span>' +
-        '</button>' +
-        '<div class="bda-actions">' +
-        ('<button type="button" class="bda-act" data-act="more" title="' + t('more') + '">') + SVG_ICONS.more + '</button>' +
+        '</span></span></button>' +
+        '<div class="bda-actions"><button type="button" class="bda-act" data-act="more" title="' + t('more') + '">' + SVG_ICONS.more + '</button>' +
         '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? t('unpin') : t('pin')) + '">' +
-        (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
-        '</button>' +
-        '</div>' +
-        '</li>';
+        (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) + '</button></div></li>';
     }).join('') + '</ul>';
   } else {
     container.innerHTML = '<ul class="bda-list">' + items.map(it => {
       const isOpening = state.openingRoot === it.root;
-      return '<li class="bda-item" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + (TINTS[it.skill] || '#888') + '">' +
-        '<button type="button" class="bda-row" data-act="open" ' + (isOpening ? 'disabled' : '') + '>' +
-        '<span class="bda-glyph">' + (isOpening ? '<span class="bda-spinner"></span>' : typeIconSvg(it.skill, 18)) + '</span>' +
-        '<span class="bda-name">' + esc(it.title) + '</span>' +
-        '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + (it.note ? ' · ' + esc(it.note) : '') + '</span>' +
-        '</button>' +
-        '<div class="bda-row-tools">' +
-        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '" title="' + (it.pinned ? t('unpin') : t('pin')) + '">' +
-        (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
-        '</button>' +
-        ('<button type="button" class="bda-act" data-act="more" title="' + t('more') + '">') + SVG_ICONS.more + '</button>' +
-        '</div>' +
-        '</li>';
+      const tint = it.typeMissing ? '#71717a' : (TINTS[it.skill] || '#6366f1');
+      return '<li class="bda-item" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + tint + '">' +
+        '<button type="button" class="bda-row" data-act="open" ' + ((isOpening || it.missing) ? 'disabled' : '') + '>' +
+        '<span class="bda-glyph">' + (isOpening ? '<span class="bda-spinner"></span>' : typeIconSvg(it.typeMissing ? '__unknown__' : it.skill, 18)) + '</span>' +
+        '<span class="bda-name">' + esc(it.title) + (it.typeMissing ? ' [' + esc(t('typeMissingBadge')) + ']' : '') + '</span>' +
+        '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + ago(it.openedAt) + '</span>' +
+        '</button><div class="bda-row-tools">' +
+        '<button type="button" class="bda-act" data-act="pin" data-on="' + it.pinned + '">' + (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) + '</button>' +
+        '<button type="button" class="bda-act" data-act="more">' + SVG_ICONS.more + '</button></div></li>';
     }).join('') + '</ul>';
   }
   activateLivePreviews(container);
 }
 
-// 实时预览：进入视口才挂载 iframe（1280×800 等比缩到卡片宽），加载完成后淡入。
-// sandbox 不带 allow-same-origin：作品脚本以 opaque origin 运行，碰不到库服务的 API。
 function activateLivePreviews(container) {
   const io = new IntersectionObserver((entries) => {
     for (const e of entries) {
@@ -2027,19 +2140,142 @@ function activateLivePreviews(container) {
   container.querySelectorAll('.bda-live[data-src]').forEach((f) => io.observe(f));
 }
 
-// 打开编辑器交互
+function formatMb(bytes) {
+  return (Number(bytes || 0) / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function updateRuntimeWaitUi(rt) {
+  if (!rt) return;
+  const total = rt.totalBytes || 21605122;
+  const received = rt.bytesReceived || 0;
+  const pct = total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0;
+  document.getElementById('runtimeWaitBar').style.width = pct + '%';
+  document.getElementById('runtimeWaitText').textContent = rt.state === 'error'
+    ? String(rt.error || t('unknownError'))
+    : t('runtimeProgress', { received: formatMb(received), total: formatMb(total) }) + ' (' + pct + '%)';
+}
+
+function showRuntimeWaitView(item, rt) {
+  pendingWaitItem = item;
+  document.getElementById('editorTitle').textContent = item.title;
+  document.getElementById('frame').classList.add('hidden');
+  document.getElementById('l1Banner').classList.add('hidden');
+  document.getElementById('runtimeWait').classList.remove('hidden');
+  document.getElementById('listView').classList.add('hidden');
+  document.getElementById('editorView').classList.remove('hidden');
+  updateRuntimeWaitUi(rt);
+}
+
+function showUnknownTypeDialog(item) {
+  openDialog(
+    '<h2>' + esc(t('unknownTypeTitle', { type: item.skill })) + '</h2>' +
+    '<p>' + esc(t('unknownTypeDesc', { root: item.root })) + '</p>' +
+    '<p style="font-size:12px">' + esc(t('unknownTypeMeta', { type: item.skill, uid: item.typeUid || '—', source: item.typeSource || '—' })) + '</p>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="unkCopy">' + t('copyPath') + '</button>' +
+    '<button type="button" class="bda-btn" id="unkForget">' + t('forget') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="unkTypes">' + t('openTypesManager') + '</button>' +
+    '<button type="button" class="bda-btn" id="unkClose">' + t('cancel') + '</button></div>'
+  );
+  document.getElementById('unkClose').onclick = closeDialog;
+  document.getElementById('unkCopy').onclick = async () => { await navigator.clipboard.writeText(item.root); showToast(t('legacyPathCopied', { root: item.root })); };
+  document.getElementById('unkTypes').onclick = () => { closeDialog(); openTypesManager(); };
+  document.getElementById('unkForget').onclick = async () => {
+    closeDialog();
+    const res = await api('/api/forget', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
+    showToast(res.ok ? t('forgotten') : t('forgetFailed') + (res.error || ''));
+    if (res.ok) await reload();
+  };
+}
+
+function showLegacyIncompatibleDialog(item, res) {
+  openDialog(
+    '<h2>' + esc(t('legacyTitle')) + '</h2>' +
+    '<p>' + esc(t('legacyDesc', { title: item.title, error: res.error || '' })) + '</p>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" data-primary="true" id="legAgent">' + t('legacyAgentConvert') + '</button>' +
+    (res.hasStaticHtml ? ('<button type="button" class="bda-btn" id="legPreview">' + t('legacyReadonlyPreview') + '</button>') : ('<button type="button" class="bda-btn" id="legPath">' + t('legacyShowPath') + '</button>')) +
+    '<button type="button" class="bda-btn" id="legCancel">' + t('cancel') + '</button></div>'
+  );
+  document.getElementById('legCancel').onclick = closeDialog;
+  document.getElementById('legAgent').onclick = async () => {
+    closeDialog();
+    const r = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ legacyMigrate: item.root, skill: item.skill, error: res.error }) });
+    if (r.ok) showToast(t('agentStarted'));
+    else { try { await navigator.clipboard.writeText(r.starter || ''); showToast(t('draftCopied') + (r.error || '')); } catch { showToast(t('startFailed') + (r.error || '')); } }
+  };
+  if (res.hasStaticHtml) {
+    document.getElementById('legPreview').onclick = () => {
+      closeDialog();
+      const frame = document.getElementById('frame');
+      document.getElementById('editorTitle').textContent = item.title + ' · ' + t('legacyReadonlyPreview');
+      document.getElementById('runtimeWait').classList.add('hidden');
+      document.getElementById('l1Banner').classList.add('hidden');
+      frame.classList.remove('hidden');
+      frame.src = '/api/preview?skill=' + encodeURIComponent(item.skill) + '&root=' + encodeURIComponent(item.root);
+      document.getElementById('listView').classList.add('hidden');
+      document.getElementById('editorView').classList.remove('hidden');
+    };
+  } else if (document.getElementById('legPath')) {
+    document.getElementById('legPath').onclick = async () => {
+      await navigator.clipboard.writeText(item.root);
+      closeDialog();
+      showToast(t('legacyPathCopied', { root: item.root }));
+    };
+  }
+}
+
 async function openItem(item) {
+  if (item.typeMissing) return showUnknownTypeDialog(item);
+  if (item.typeDisabled) {
+    openDialog('<h2>' + esc(t('typeDisabledTitle', { type: item.skill })) + '</h2><p>' + esc(t('typeDisabledDesc')) + '</p><div class="bda-dialog-actions"><button type="button" class="bda-btn" data-primary="true" id="tdOpen">' + t('openTypesManager') + '</button><button type="button" class="bda-btn" id="tdClose">' + t('close') + '</button></div>');
+    document.getElementById('tdClose').onclick = closeDialog;
+    document.getElementById('tdOpen').onclick = () => { closeDialog(); openTypesManager(); };
+    return;
+  }
+
   state.openingRoot = item.root;
   renderItems();
   try {
     const res = await api('/api/open', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ skill: item.skill, root: item.root }) });
     if (!res.ok) {
+      if (res.code === 'runtime_not_ready') return showRuntimeWaitView(item, res.runtime);
+      if (res.code === 'legacy_incompatible') return showLegacyIncompatibleDialog(item, res);
       showToast(t('cannotOpen') + (res.error || t('unknownError')));
       return;
     }
+    pendingWaitItem = null;
     const frame = document.getElementById('frame');
-    document.getElementById('editorTitle').textContent = item.title + ' · ' + skillText(item.skill, 'name');
-    frame.src = res.url;
+    document.getElementById('runtimeWait').classList.add('hidden');
+    frame.classList.remove('hidden');
+    document.getElementById('editorTitle').textContent = item.title + ' · ' + (SKILL_MAP[item.skill] ? skillText(item.skill, 'name') : item.skill);
+    if (embeddedView) { embeddedView.destroy(); embeddedView = null; }
+    if (res.embedMode === 'shell') {
+      document.getElementById('l1Banner').classList.remove('hidden');
+      document.getElementById('copyCommentsBtn').onclick = async () => {
+        const cmd = '请读取 Open Artifact 作品 ' + (res.id || item.root) + ' 的待处理评论（open-artifact comments \\'{"action":"read","url":"open-artifact://artifact/' + res.id + '"}\\'）并处理回复。';
+        await navigator.clipboard.writeText(cmd);
+        showToast(t('l1CommentCopied'));
+      };
+      embeddedView = embedArtifact(frame, {
+        url: res.url,
+        agentName: 'Agent',
+        harness: 'orca-design',
+        toolbar: true,
+        theme: { scheme: resolvedScheme() },
+        onNewSession: async ({ prompt }) => {
+          const r = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ customPrompt: prompt }) });
+          if (r.ok) showToast(t('agentStarted'));
+          else { try { await navigator.clipboard.writeText(prompt || ''); showToast(t('draftCopied') + (r.error || '')); } catch {} }
+        },
+        onCommentSent: () => showToast(t('l1Banner')),
+        onOpenExternal: (u) => window.open(u, '_blank', 'noopener'),
+        onClose: backToGallery,
+      });
+    } else {
+      document.getElementById('l1Banner').classList.add('hidden');
+      frame.src = res.url;
+    }
     document.getElementById('popBtn').onclick = () => window.open(res.url, '_blank');
     document.getElementById('listView').classList.add('hidden');
     document.getElementById('editorView').classList.remove('hidden');
@@ -2053,6 +2289,8 @@ async function openItem(item) {
 }
 
 function backToGallery() {
+  pendingWaitItem = null;
+  if (embeddedView) { embeddedView.destroy(); embeddedView = null; }
   document.getElementById('editorView').classList.add('hidden');
   document.getElementById('listView').classList.remove('hidden');
   document.getElementById('frame').src = 'about:blank';
@@ -2064,38 +2302,86 @@ window.addEventListener('popstate', () => {
 });
 document.getElementById('backBtn').onclick = backToGallery;
 
-// 更多菜单 Action Menu
+try {
+  const es = new EventSource('/api/runtime/events');
+  es.onmessage = (ev) => {
+    const rt = JSON.parse(ev.data);
+    state.runtime = rt;
+    if (pendingWaitItem && !document.getElementById('runtimeWait').classList.contains('hidden')) {
+      updateRuntimeWaitUi(rt);
+      if (rt.state === 'ready') {
+        const nextItem = pendingWaitItem;
+        pendingWaitItem = null;
+        showToast(t('runtimeReady'));
+        openItem(nextItem);
+      }
+    }
+  };
+} catch {}
+
+document.getElementById('runtimeRetryBtn').onclick = async () => {
+  const r = await api('/api/runtime/retry', { method: 'POST', headers: {'content-type':'application/json'}, body: '{}' });
+  if (r.runtime) updateRuntimeWaitUi(r.runtime);
+};
+
+async function uploadOfflineTgzFile(file) {
+  const CHUNK_BYTES = 32 * 1024;
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const totalChunks = Math.max(1, Math.ceil(buf.length / CHUNK_BYTES));
+  const uploadId = 'up_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  let lastRes = null;
+  for (let i = 0; i < totalChunks; i++) {
+    const slice = buf.subarray(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES);
+    let bin = '';
+    for (let j = 0; j < slice.length; j++) bin += String.fromCharCode(slice[j]);
+    lastRes = await api('/api/runtime/import', {
+      method: 'POST',
+      headers: {'content-type':'application/json'},
+      body: JSON.stringify({ uploadId, chunkIndex: i, totalChunks, fileName: file.name, dataBase64: btoa(bin) }),
+    });
+    if (!lastRes.ok) break;
+  }
+  return lastRes;
+}
+
+document.getElementById('runtimeFileInput').onchange = async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const r = await uploadOfflineTgzFile(file);
+  if (r?.ok) {
+    showToast(t('runtimeReady'));
+    if (pendingWaitItem) { const it = pendingWaitItem; pendingWaitItem = null; await openItem(it); }
+  } else {
+    showToast(t('runtimeImportFailed') + (r?.error || t('unknownError')));
+  }
+};
+
+document.getElementById('runtimePathBtn').onclick = async () => {
+  const p = document.getElementById('runtimePathInput').value.trim();
+  if (!p) return;
+  const r = await api('/api/runtime/import', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ filePath: p }) });
+  if (r.ok) {
+    showToast(t('runtimeReady'));
+    if (pendingWaitItem) { const it = pendingWaitItem; pendingWaitItem = null; await openItem(it); }
+  } else {
+    showToast(t('runtimeImportFailed') + (r.error || t('unknownError')));
+  }
+};
+
 function showActionsMenu(item, anchorEl) {
   const rect = anchorEl.getBoundingClientRect();
   const layer = document.getElementById('menuLayer');
   anchorEl.closest('.bda-item')?.setAttribute('data-menu', 'true');
   layer.innerHTML = '<div class="bda-menu" style="left:' + Math.min(rect.left, window.innerWidth - 220) + 'px;top:' + (rect.bottom + 6) + 'px">' +
-    '<button type="button" class="bda-menu-item" data-menu-action="pin">' +
-    SVG_ICONS.pin + '<span class="bda-menu-label">' + (item.pinned ? t('unpin') : t('pin')) + '</span><kbd class="bda-menu-key">P</kbd>' +
-    '</button>' +
-    '<button type="button" class="bda-menu-item" data-menu-action="rename">' +
-    SVG_ICONS.rename + ('<span class="bda-menu-label">' + t('rename') + '</span><kbd class="bda-menu-key">R</kbd>') +
-    '</button>' +
-    '<button type="button" class="bda-menu-item" data-menu-action="recreate">' +
-    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg>' +
-    ('<span class="bda-menu-label">' + t('recreate') + '</span><kbd class="bda-menu-key">S</kbd>') +
-    '</button>' +
-    '<button type="button" class="bda-menu-item" data-menu-action="copy">' +
-    SVG_ICONS.copy + ('<span class="bda-menu-label">' + t('copyLink') + '</span><kbd class="bda-menu-key">C</kbd>') +
-    '</button>' +
-    (item.missing
-      ? '<button type="button" class="bda-menu-item" data-menu-action="forget" data-danger="true">' +
-        SVG_ICONS.trash + ('<span class="bda-menu-label">' + t('forget') + '</span><kbd class="bda-menu-key">X</kbd>') +
-        '</button>'
-      : '') +
+    '<button type="button" class="bda-menu-item" data-menu-action="pin">' + SVG_ICONS.pin + '<span class="bda-menu-label">' + (item.pinned ? t('unpin') : t('pin')) + '</span><kbd class="bda-menu-key">P</kbd></button>' +
+    '<button type="button" class="bda-menu-item" data-menu-action="rename">' + SVG_ICONS.rename + '<span class="bda-menu-label">' + t('rename') + '</span><kbd class="bda-menu-key">R</kbd></button>' +
+    '<button type="button" class="bda-menu-item" data-menu-action="recreate">' + SVG_ICONS.info + '<span class="bda-menu-label">' + t('recreate') + '</span><kbd class="bda-menu-key">S</kbd></button>' +
+    '<button type="button" class="bda-menu-item" data-menu-action="copy">' + SVG_ICONS.copy + '<span class="bda-menu-label">' + t('copyLink') + '</span><kbd class="bda-menu-key">C</kbd></button>' +
+    (item.missing ? '<button type="button" class="bda-menu-item" data-menu-action="forget" data-danger="true">' + SVG_ICONS.trash + '<span class="bda-menu-label">' + t('forget') + '</span></button>' : '') +
     '<div class="bda-menu-rule"></div>' +
-    '<button type="button" class="bda-menu-item" data-menu-action="delete" data-danger="true">' +
-    SVG_ICONS.trash + ('<span class="bda-menu-label">' + t('delete') + '</span><kbd class="bda-menu-key">Del</kbd>') +
-    '</button>' +
-    '</div>';
+    '<button type="button" class="bda-menu-item" data-menu-action="delete" data-danger="true">' + SVG_ICONS.trash + '<span class="bda-menu-label">' + t('delete') + '</span></button></div>';
 
-  const menu = layer.querySelector('.bda-menu');
-  menu.onclick = async (e) => {
+  layer.querySelector('.bda-menu').onclick = async (e) => {
     const btn = e.target.closest('[data-menu-action]');
     if (!btn) return;
     const act = btn.getAttribute('data-menu-action');
@@ -2106,252 +2392,233 @@ function showActionsMenu(item, anchorEl) {
     } else if (act === 'rename') {
       openRenameDialog(item);
     } else if (act === 'recreate') {
-      const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
-      if (res.ok) {
-        showToast(t('remixSent', {outcome: res.outcome || 'chat'}));
-      } else {
-        try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); }
-        catch { showToast(t('remixFailed') + (res.error || '')); }
-      }
+      const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, skill: item.skill, title: item.title }) });
+      if (res.ok) showToast(t('remixSent', {outcome: res.outcome || 'chat'}));
+      else { try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); } catch { showToast(t('remixFailed') + (res.error || '')); } }
     } else if (act === 'forget') {
       const res = await api('/api/forget', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
       showToast(res.ok ? t('forgotten') : t('forgetFailed') + (res.error || ''));
       if (res.ok) await reload();
     } else if (act === 'copy') {
       const res = await api('/api/open', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ skill: item.skill, root: item.root }) });
-      if (res.ok && res.url) {
-        await navigator.clipboard.writeText(res.url);
-        showToast(t('linkCopied'));
-      } else {
-        showToast(t('linkFailed'));
-      }
+      if (res.ok && res.url) { await navigator.clipboard.writeText(res.url); showToast(t('linkCopied')); }
+      else showToast(t('linkFailed'));
     } else if (act === 'delete') {
       openDeleteDialog(item);
     }
   };
 }
 
-// 重命名弹窗
 function openRenameDialog(item) {
   openDialog(
-    ('<h2>' + t('renameTitle') + '</h2>') +
-    '<p>' + esc(t('renameDescription', {title: item.title})) + '</p>' +
+    '<h2>' + t('renameTitle') + '</h2><p>' + esc(t('renameDescription', {title: item.title})) + '</p>' +
     '<input id="renameInput" value="' + esc(item.title) + '" maxlength="200" autofocus>' +
-    '<div class="bda-dialog-actions">' +
-    ('<button type="button" class="bda-btn" id="renameCancel">' + t('cancel') + '</button>') +
-    ('<button type="button" class="bda-btn" data-primary="true" id="renameSave">' + t('save') + '</button>') +
-    '</div>'
+    '<div class="bda-dialog-actions"><button type="button" class="bda-btn" id="renameCancel">' + t('cancel') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" id="renameSave">' + t('save') + '</button></div>'
   );
-  const input = document.getElementById('renameInput');
-  input.focus();
-  input.select();
+  const input = document.getElementById('renameInput'); input.focus(); input.select();
   document.getElementById('renameCancel').onclick = closeDialog;
   document.getElementById('renameSave').onclick = async () => {
     const val = input.value.trim();
     if (!val || val === item.title) return closeDialog();
     closeDialog();
     const res = await api('/api/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, title: val, skill: item.skill }) });
-    if (res.ok) {
-      showToast(t('renamed', {title: val}));
-      await reload();
-    } else {
-      showToast(t('renameFailed') + (res.error || ''));
-    }
+    if (res.ok) { showToast(t('renamed', {title: val})); await reload(); }
+    else showToast(t('renameFailed') + (res.error || ''));
   };
 }
 
-// 删除确认弹窗
 function openDeleteDialog(item) {
-  const desc = item.deletable ?
-    t('deleteMove') :
-    t('deleteKeep') + item.root;
   openDialog(
     '<h2>' + esc(t('deleteTitle', {title: item.title})) + '</h2>' +
-    '<p>' + esc(desc) + '</p>' +
-    '<div class="bda-dialog-actions">' +
-    ('<button type="button" class="bda-btn" id="deleteCancel">' + t('cancel') + '</button>') +
-    ('<button type="button" class="bda-btn" data-danger="true" id="deleteConfirm">' + t('delete') + '</button>') +
-    '</div>'
+    '<p>' + esc(t('deleteKeepDefault', {title: item.title}) + ' ' + item.root) + '</p>' +
+    (item.deletable ? ('<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer"><input type="checkbox" id="moveFolderChk"><span>' + esc(t('deleteAlsoMove')) + '</span></label>') : '') +
+    '<div class="bda-dialog-actions"><button type="button" class="bda-btn" id="deleteCancel">' + t('cancel') + '</button>' +
+    '<button type="button" class="bda-btn" data-danger="true" id="deleteConfirm">' + t('delete') + '</button></div>'
   );
   document.getElementById('deleteCancel').onclick = closeDialog;
   document.getElementById('deleteConfirm').onclick = async () => {
+    const moveFolder = Boolean(document.getElementById('moveFolderChk')?.checked);
     closeDialog();
-    const res = await api('/api/delete', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root }) });
-    if (res.ok) {
-      showToast(item.deletable ? t('deleted', {title: item.title}) : t('removed', {title: item.title}), res.trash);
-      await reload();
-    } else {
-      showToast(t('deleteFailed') + (res.error || ''));
-    }
+    const res = await api('/api/delete', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, moveFolder }) });
+    if (res.ok) { showToast(moveFolder && res.moved ? t('deleted', {title: item.title}) : t('removed', {title: item.title}), res.trash); await reload(); }
+    else showToast(t('deleteFailed') + (res.error || ''));
   };
 }
 
-// 新建弹窗（含示例创建与提示词复制）
-function openCreateDialog(skillId) {
-  const s = SKILL_MAP[skillId];
-  if (!s) return;
-  const canScaffold = !!EXAMPLE_TEMPLATES[skillId];
-  openDialog(
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
-    typeIconSvg(s.id, 26) +
-    '<h2 style="margin:0">' + esc(t('createTitle', {title: skillText(s.id, 'name')})) + '</h2>' +
-    '</div>' +
-    '<p>' + esc(skillText(s.id, 'about')) + '</p>' +
-    '<div class="bda-dialog-actions" style="margin-top:20px;display:flex;gap:8px">' +
-    ('<button type="button" class="bda-btn" id="copyPromptBtn">' + t('copyPrompt') + '</button>') +
-    (canScaffold ? ('<button type="button" class="bda-btn" data-primary="true" id="createScaffoldBtn">' + t('createBlank') + '</button>') : '') +
-    ('<button type="button" class="bda-btn" id="createCancel">' + t('cancel') + '</button>') +
-    '</div>'
-  );
-  document.getElementById('createCancel').onclick = closeDialog;
-  document.getElementById('copyPromptBtn').onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(skillText(s.id, 'prompt'));
-      closeDialog();
-      showToast(t('promptCopied'));
-    } catch {
-      showToast(t('copyFailed') + skillText(s.id, 'prompt'));
-    }
-  };
-  if (canScaffold) {
-    document.getElementById('createScaffoldBtn').onclick = async () => {
-      closeDialog();
-      const res = await api('/api/create', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ skill: skillId }) });
-      if (res.ok && res.root) {
-        await reload();
-        const found = state.artifacts.find(a => a.root === res.root);
-        if (found) await openItem(found);
-      } else {
-        showToast(t('createFailed') + (res.error || ''));
-      }
-    };
+async function createAndOpenBlank(skillId) {
+  const res = await api('/api/create', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ skill: skillId }) });
+  if (res.ok && res.root) {
+    await reload();
+    const found = state.artifacts.find(a => a.root === res.root);
+    if (found) await openItem(found);
+  } else {
+    showToast(t('createFailed') + (res.error || ''));
   }
 }
 
-// 筛选菜单 FilterMenu
+function openCreateDialog(skillId) {
+  if (skillId === 'design-system') {
+    const existing = state.artifacts.find(a => a.skill === 'design-system' && !a.missing);
+    if (existing) {
+      openDialog(
+        '<h2>' + esc(t('dsUniqueTitle')) + '</h2><p>' + esc(t('dsUniqueDesc', { title: existing.title })) + '</p>' +
+        '<div class="bda-dialog-actions"><button type="button" class="bda-btn" id="dsCancel">' + t('cancel') + '</button>' +
+        '<button type="button" class="bda-btn" id="dsAnyway">' + t('dsCreateAnyway') + '</button>' +
+        '<button type="button" class="bda-btn" data-primary="true" id="dsOpen">' + t('dsOpenExisting') + '</button></div>'
+      );
+      document.getElementById('dsCancel').onclick = closeDialog;
+      document.getElementById('dsOpen').onclick = () => { closeDialog(); openItem(existing); };
+      document.getElementById('dsAnyway').onclick = () => { closeDialog(); showCreateModalInner(skillId); };
+      return;
+    }
+  }
+  showCreateModalInner(skillId);
+}
+
+function showCreateModalInner(skillId) {
+  const s = SKILL_MAP[skillId] || (state.types || []).find(tp => tp.id === skillId);
+  if (!s) return;
+  const titleName = SKILL_MAP[skillId] ? skillText(skillId, 'name') : (s.name || s.title || skillId);
+  const aboutText = SKILL_MAP[skillId] ? skillText(skillId, 'about') : (s.description || '');
+  const promptText = SKILL_MAP[skillId] ? skillText(skillId, 'prompt') : ('/open-artifact ' + skillId + ' ');
+  const canBlank = Boolean(s.blankCreatable || EXAMPLE_TEMPLATES[skillId]);
+
+  openDialog(
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' + typeIconSvg(skillId, 26) + '<h2 style="margin:0">' + esc(t('createTitle', {title: titleName})) + '</h2></div>' +
+    '<p>' + esc(aboutText) + '</p>' +
+    '<div class="bda-dialog-actions">' +
+    '<button type="button" class="bda-btn" id="copyPromptBtn">' + t('copyPrompt') + '</button>' +
+    '<button type="button" class="bda-btn" ' + (!canBlank ? 'data-primary="true" ' : '') + 'id="askAgentBtn">' + t('askAgentCreate') + '</button>' +
+    (canBlank ? ('<button type="button" class="bda-btn" data-primary="true" id="createBlankBtn">' + t('createBlank') + '</button>') : '') +
+    '<button type="button" class="bda-btn" id="createCancel">' + t('cancel') + '</button></div>'
+  );
+  document.getElementById('createCancel').onclick = closeDialog;
+  document.getElementById('copyPromptBtn').onclick = async () => {
+    try { await navigator.clipboard.writeText(promptText); closeDialog(); showToast(t('promptCopied')); }
+    catch { showToast(t('copyFailed') + promptText); }
+  };
+  document.getElementById('askAgentBtn').onclick = async () => {
+    closeDialog();
+    const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ customPrompt: promptText }) });
+    if (res.ok) showToast(t('agentStarted'));
+    else { try { await navigator.clipboard.writeText(res.starter || promptText); showToast(t('draftCopied') + (res.error || '')); } catch {} }
+  };
+  if (canBlank) {
+    document.getElementById('createBlankBtn').onclick = async () => { closeDialog(); await createAndOpenBlank(skillId); };
+  }
+}
+
+async function openTypesManager() {
+  const res = await api('/api/types');
+  const types = res.types || [];
+  const rt = state.runtime || (await api('/api/runtime/status'));
+  const rtLabel = rt?.state === 'ready'
+    ? t('runtimeReadyShort', { source: rt.source || 'local', version: rt.version || '0.14.7' })
+    : t('runtimeMissingShort');
+
+  openDialog(
+    '<h2>' + esc(t('typesManagerTitle')) + '</h2>' +
+    '<p><strong>' + esc(t('runtimeStatusLabel')) + ':</strong> ' + esc(rtLabel) + '</p>' +
+    '<div style="max-height:280px;overflow:auto;margin-bottom:14px">' +
+    types.map(tp => {
+      const name = SKILL_MAP[tp.id] ? skillText(tp.id, 'name') : (tp.name || tp.title || tp.id);
+      return '<div class="type-row"><div><div><strong>' + esc(name) + '</strong> <code style="font-size:11px">' + esc(tp.id) + '</code></div>' +
+        '<div class="type-row-meta">' + esc(tp.scope || 'builtin') + ' · v' + esc(tp.version || '0.1.0') + '</div></div>' +
+        '<button type="button" class="bda-btn" data-toggle-enable="' + esc(tp.id) + '" data-enabled="' + (tp.enabled !== false) + '">' +
+        (tp.enabled !== false ? t('typesEnabled') : t('typesDisabled')) + '</button></div>';
+    }).join('') + '</div>' +
+    '<div style="border-top:.5px solid var(--dsw-alias-border-l2);padding-top:12px">' +
+    '<p style="margin-bottom:8px"><strong>' + esc(t('typesInstallTitle')) + '</strong></p>' +
+    '<div style="display:flex;gap:8px"><input type="text" id="oatypePathInput" placeholder="' + esc(t('typesInstallPathPlaceholder')) + '" style="flex:1;margin:0">' +
+    '<button type="button" class="bda-btn" id="oatypePreviewBtn">' + t('typesPreviewBtn') + '</button></div>' +
+    '<div id="oatypePreviewBox" style="margin-top:8px;font-size:12px"></div></div>' +
+    '<div class="bda-dialog-actions">' +
+    (state.workspaceRoot ? ('<button type="button" class="bda-btn" id="trustProjBtn">' + t('typesTrustProject') + '</button>') : '') +
+    '<button type="button" class="bda-btn" data-primary="true" id="tmClose">' + t('close') + '</button></div>'
+  );
+  document.getElementById('tmClose').onclick = closeDialog;
+  document.querySelectorAll('[data-toggle-enable]').forEach(btn => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-toggle-enable');
+      const nextEnabled = btn.getAttribute('data-enabled') !== 'true';
+      await api('/api/types/toggle', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ id, enabled: nextEnabled }) });
+      await reload();
+      openTypesManager();
+    };
+  });
+  if (document.getElementById('trustProjBtn')) {
+    document.getElementById('trustProjBtn').onclick = async () => {
+      await api('/api/types/trust-project', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ workspace: state.workspaceRoot }) });
+      showToast(t('typesTrusted'));
+    };
+  }
+  document.getElementById('oatypePreviewBtn').onclick = async () => {
+    const filePath = document.getElementById('oatypePathInput').value.trim();
+    if (!filePath) return;
+    const prev = await api('/api/types/install', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ filePath, preview: true }) });
+    const box = document.getElementById('oatypePreviewBox');
+    if (!prev.ok) { box.textContent = prev.error || t('unknownError'); return; }
+    box.innerHTML = '<div>id: <code>' + esc(prev.id) + '</code> · version: ' + esc(prev.version) + ' · sha256: <code>' + esc(String(prev.sha256).slice(0, 16)) + '…</code></div>' +
+      '<button type="button" class="bda-btn" data-primary="true" id="confirmOatypeBtn" style="margin-top:6px">' + t('typesConfirmInstall') + '</button>';
+    document.getElementById('confirmOatypeBtn').onclick = async () => {
+      const inst = await api('/api/types/install', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ filePath, confirm: true }) });
+      if (inst.ok) { await reload(); openTypesManager(); } else { box.textContent = inst.error || t('unknownError'); }
+    };
+  };
+}
+
 function showFilterMenu(anchorEl) {
   const rect = anchorEl.getBoundingClientRect();
   const layer = document.getElementById('menuLayer');
   const typeCounts = new Map();
   state.artifacts.forEach(a => typeCounts.set(a.skill, (typeCounts.get(a.skill) || 0) + 1));
+  const dynamicTypes = [...new Set([...SKILLS_CONFIG.map(s => s.id), ...(state.types || []).map(tp => tp.id), ...state.artifacts.map(a => a.skill)])];
   const sortLabels = { opened: t('sortOpened'), updated: t('sortUpdated'), created: t('sortCreated'), name: t('sortName') };
   const dateLabels = { any: t('any'), today: t('today'), yesterday: t('yesterday'), week: t('week'), month: t('month') };
   const shareLabels = { any: t('any'), shared: t('shared'), private: t('private') };
 
   layer.innerHTML = '<div class="bda-menu" style="right:' + (window.innerWidth - rect.right) + 'px;top:' + (rect.bottom + 6) + 'px">' +
-    '<div class="bda-menu-row">' +
-    '<button type="button" class="bda-menu-item">' +
-    ('<span class="bda-menu-label">' + t('sortBy') + '</span><span class="bda-menu-value">') + sortLabels[state.filters.sort] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
-    '</button>' +
-    '<div class="bda-submenu">' +
-    Object.entries(sortLabels).map(([k, v]) =>
-      '<button type="button" class="bda-menu-item" data-set-sort="' + k + '"><span class="bda-menu-label">' + v + '</span>' +
-      (state.filters.sort === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>'
-    ).join('') +
-    '</div></div>' +
+    '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('sortBy') + '</span><span class="bda-menu-value">' + sortLabels[state.filters.sort] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
+    '<div class="bda-submenu">' + Object.entries(sortLabels).map(([k, v]) => '<button type="button" class="bda-menu-item" data-set-sort="' + k + '"><span class="bda-menu-label">' + v + '</span>' + (state.filters.sort === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>').join('') + '</div></div>' +
     '<div class="bda-menu-rule"></div>' +
-    '<div class="bda-menu-row">' +
-    '<button type="button" class="bda-menu-item">' +
-    ('<span class="bda-menu-label">' + t('type') + '</span><span class="bda-menu-value">') + (state.filters.types.length ? state.filters.types.length + t('selectedSuffix') : t('any')) + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
-    '</button>' +
-    '<div class="bda-submenu">' +
-    SKILLS_CONFIG.map(s => {
-      const on = state.filters.types.includes(s.id);
-      return '<button type="button" class="bda-menu-item" data-toggle-type="' + s.id + '">' +
-        '<span class="bda-check" data-on="' + on + '">' + (on ? SVG_ICONS.tick : '') + '</span>' +
-        '<span class="bda-menu-label">' + esc(skillText(s.id, 'name')) + '</span>' +
-        '<span class="bda-menu-count">' + (typeCounts.get(s.id) || 0) + '</span></button>';
-    }).join('') +
-    '</div></div>' +
-    '<div class="bda-menu-row">' +
-    '<button type="button" class="bda-menu-item">' +
-    ('<span class="bda-menu-label">' + t('openedAt') + '</span><span class="bda-menu-value">') + dateLabels[state.filters.date] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
-    '</button>' +
-    '<div class="bda-submenu">' +
-    Object.entries(dateLabels).map(([k, v]) =>
-      '<button type="button" class="bda-menu-item" data-set-date="' + k + '"><span class="bda-menu-label">' + v + '</span>' +
-      (state.filters.date === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>'
-    ).join('') +
-    '</div></div>' +
-    '<div class="bda-menu-row">' +
-    '<button type="button" class="bda-menu-item">' +
-    ('<span class="bda-menu-label">' + t('sharing') + '</span><span class="bda-menu-value">') + shareLabels[state.filters.sharing] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span>' +
-    '</button>' +
-    '<div class="bda-submenu">' +
-    Object.entries(shareLabels).map(([k, v]) =>
-      '<button type="button" class="bda-menu-item" data-set-share="' + k + '"><span class="bda-menu-label">' + v + '</span>' +
-      (state.filters.sharing === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>'
-    ).join('') +
-    '</div></div>' +
+    '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('type') + '</span><span class="bda-menu-value">' + (state.filters.types.length ? state.filters.types.length + t('selectedSuffix') : t('any')) + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
+    '<div class="bda-submenu">' + dynamicTypes.map(id => {
+      const on = state.filters.types.includes(id);
+      const label = SKILL_MAP[id] ? skillText(id, 'name') : id;
+      return '<button type="button" class="bda-menu-item" data-toggle-type="' + esc(id) + '"><span class="bda-check" data-on="' + on + '">' + (on ? SVG_ICONS.tick : '') + '</span><span class="bda-menu-label">' + esc(label) + '</span><span class="bda-menu-count">' + (typeCounts.get(id) || 0) + '</span></button>';
+    }).join('') + '</div></div>' +
+    '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('openedAt') + '</span><span class="bda-menu-value">' + dateLabels[state.filters.date] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
+    '<div class="bda-submenu">' + Object.entries(dateLabels).map(([k, v]) => '<button type="button" class="bda-menu-item" data-set-date="' + k + '"><span class="bda-menu-label">' + v + '</span>' + (state.filters.date === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>').join('') + '</div></div>' +
+    '<div class="bda-menu-row"><button type="button" class="bda-menu-item"><span class="bda-menu-label">' + t('sharing') + '</span><span class="bda-menu-value">' + shareLabels[state.filters.sharing] + '</span><span class="bda-menu-chev">' + SVG_ICONS.chevron + '</span></button>' +
+    '<div class="bda-submenu">' + Object.entries(shareLabels).map(([k, v]) => '<button type="button" class="bda-menu-item" data-set-share="' + k + '"><span class="bda-menu-label">' + v + '</span>' + (state.filters.sharing === k ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>').join('') + '</div></div>' +
     '<div class="bda-menu-rule"></div>' +
-    '<button type="button" class="bda-menu-item" data-toggle-pinned="true">' +
-    ('<span class="bda-menu-label">' + t('pinned') + '</span>') + (state.filters.pinned ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') +
-    '</button>' +
-    (isFilterActive() ? ('<button type="button" class="bda-menu-item" data-clear-filters="true"><span class="bda-menu-label">' + t('clearFilters') + '</span></button>') : '') +
-    '</div>';
+    '<button type="button" class="bda-menu-item" data-toggle-pinned="true"><span class="bda-menu-label">' + t('pinned') + '</span>' + (state.filters.pinned ? '<span class="bda-tick">' + SVG_ICONS.tick + '</span>' : '') + '</button>' +
+    (isFilterActive() ? ('<button type="button" class="bda-menu-item" data-clear-filters="true"><span class="bda-menu-label">' + t('clearFilters') + '</span></button>') : '') + '</div>';
 
-  const menu = layer.querySelector('.bda-menu');
-  menu.onclick = (e) => {
-    const tSort = e.target.closest('[data-set-sort]');
-    if (tSort) {
-      state.filters.sort = tSort.getAttribute('data-set-sort');
-      closeMenu(); renderItems(); return;
-    }
-    const tType = e.target.closest('[data-toggle-type]');
-    if (tType) {
-      const sk = tType.getAttribute('data-toggle-type');
-      if (state.filters.types.includes(sk)) {
-        state.filters.types = state.filters.types.filter(x => x !== sk);
-      } else {
-        state.filters.types.push(sk);
-      }
-      closeMenu(); renderItems(); return;
-    }
-    const tDate = e.target.closest('[data-set-date]');
-    if (tDate) {
-      state.filters.date = tDate.getAttribute('data-set-date');
-      closeMenu(); renderItems(); return;
-    }
-    const tShare = e.target.closest('[data-set-share]');
-    if (tShare) {
-      state.filters.sharing = tShare.getAttribute('data-set-share');
-      closeMenu(); renderItems(); return;
-    }
-    if (e.target.closest('[data-toggle-pinned]')) {
-      state.filters.pinned = !state.filters.pinned;
-      closeMenu(); renderItems(); return;
-    }
-    if (e.target.closest('[data-clear-filters]')) {
-      state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false };
-      closeMenu(); renderItems(); return;
-    }
+  layer.querySelector('.bda-menu').onclick = (e) => {
+    const tSort = e.target.closest('[data-set-sort]'); if (tSort) { state.filters.sort = tSort.getAttribute('data-set-sort'); closeMenu(); renderItems(); return; }
+    const tType = e.target.closest('[data-toggle-type]'); if (tType) { const sk = tType.getAttribute('data-toggle-type'); state.filters.types = state.filters.types.includes(sk) ? state.filters.types.filter(x => x !== sk) : [...state.filters.types, sk]; closeMenu(); renderItems(); return; }
+    const tDate = e.target.closest('[data-set-date]'); if (tDate) { state.filters.date = tDate.getAttribute('data-set-date'); closeMenu(); renderItems(); return; }
+    const tShare = e.target.closest('[data-set-share]'); if (tShare) { state.filters.sharing = tShare.getAttribute('data-set-share'); closeMenu(); renderItems(); return; }
+    if (e.target.closest('[data-toggle-pinned]')) { state.filters.pinned = !state.filters.pinned; closeMenu(); renderItems(); return; }
+    if (e.target.closest('[data-clear-filters]')) { state.filters = { sort: 'opened', types: [], date: 'any', sharing: 'any', pinned: false }; closeMenu(); renderItems(); }
   };
 }
 
-// 绑定全局点击与卡片交互
-document.getElementById('tiles').onclick = (e) => {
-  const btn = e.target.closest('.bda-tile');
-  if (btn && btn.getAttribute('data-skill')) openCreateDialog(btn.getAttribute('data-skill'));
-};
-
+document.getElementById('tiles').onclick = (e) => { const btn = e.target.closest('.bda-tile'); if (btn?.getAttribute('data-skill')) openCreateDialog(btn.getAttribute('data-skill')); };
+document.getElementById('typesBtn').onclick = openTypesManager;
 document.getElementById('examples').onclick = async (e) => {
-  const btn = e.target.closest('[data-example]');
-  if (!btn) return;
-  const example = OFFICIAL_EXAMPLES.find(x => x.id === btn.getAttribute('data-example'));
-  if (!example) return;
+  const btn = e.target.closest('[data-example]'); if (!btn) return;
+  const example = OFFICIAL_EXAMPLES.find(x => x.id === btn.getAttribute('data-example')); if (!example) return;
   if (btn.getAttribute('data-act') === 'preview') {
     openDialog('<h2>' + esc(exampleText(example, 'title')) + '</h2><p>' + esc(exampleText(example, 'desc')) + '</p>' +
-      (example.html ? '<div class="bda-example-preview" id="examplePreview"><iframe sandbox="" title="' + esc(t('previewTitle', {title: exampleText(example, 'title')})) + '"></iframe></div>' :
-        '<div class="bda-example-skeleton">' + drawnHtml(example.skill, exampleText(example, 'title')) +
-        ('<p>' + t('exampleSkeleton') + '</p></div>')) +
-      '<p>' + esc(exampleText(example, 'points')) + ('</p><div class="bda-dialog-actions"><button type="button" class="bda-btn" id="exampleClose">' + t('close') + '</button></div>'));
+      (example.html ? '<div class="bda-example-preview" id="examplePreview"><iframe sandbox="" title="' + esc(t('previewTitle', {title: exampleText(example, 'title')})) + '"></iframe></div>' : '<p>' + t('exampleSkeleton') + '</p>') +
+      '<p>' + esc(exampleText(example, 'points')) + '</p><div class="bda-dialog-actions"><button type="button" class="bda-btn" id="exampleClose">' + t('close') + '</button></div>');
     document.getElementById('exampleClose').onclick = closeDialog;
     if (example.html) {
-      const preview = document.getElementById('examplePreview');
-      const frame = preview.querySelector('iframe');
-      const scale = preview.clientWidth / 880;
-      preview.style.height = (560 * scale) + 'px';
-      frame.style.transform = 'scale(' + scale + ')';
+      const preview = document.getElementById('examplePreview'), frame = preview.querySelector('iframe'), scale = preview.clientWidth / 880;
+      preview.style.height = (560 * scale) + 'px'; frame.style.transform = 'scale(' + scale + ')';
       frame.srcdoc = example.html.replaceAll(STR.zh.samplePresentation, t('samplePresentation'));
     }
     return;
@@ -2360,126 +2627,71 @@ document.getElementById('examples').onclick = async (e) => {
   try {
     const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ example: example.id }) });
     if (res.ok) showToast(t('exampleStarted'));
-    else if (res.starter) {
-      try { await navigator.clipboard.writeText(res.starter); showToast(t('draftCopied') + (res.error || '')); }
-      catch { showToast(t('startFailed') + (res.error || '') + t('draftPrefix') + res.starter); }
-    } else showToast(t('startFailed') + (res.error || t('unknownError')));
-  } catch (err) { showToast(t('startFailed') + err.message); }
-  finally { btn.disabled = false; }
+    else if (res.starter) { try { await navigator.clipboard.writeText(res.starter); showToast(t('draftCopied') + (res.error || '')); } catch { showToast(t('startFailed') + (res.error || '') + t('draftPrefix') + res.starter); } }
+  } finally { btn.disabled = false; }
 };
-
 document.getElementById('recipes').onclick = async (e) => {
-  const btn = e.target.closest('[data-recipe]');
-  if (!btn) return;
+  const btn = e.target.closest('[data-recipe]'); if (!btn) return;
   const res = await api('/api/start', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ recipe: btn.getAttribute('data-recipe') }) });
-  if (res.ok) {
-    showToast(t('workflowSent', {outcome: res.outcome || 'chat'}));
-  } else {
-    try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); }
-    catch { showToast(t('workflowFailed') + (res.error || '')); }
-  }
+  if (res.ok) showToast(t('workflowSent', {outcome: res.outcome || 'chat'}));
+  else { try { await navigator.clipboard.writeText(res.starter || ''); showToast(t('draftCopied') + (res.error || '')); } catch { showToast(t('workflowFailed') + (res.error || '')); } }
 };
-
 document.getElementById('container').onclick = async (e) => {
-  const itemEl = e.target.closest('.bda-item');
-  if (!itemEl) return;
-  const root = itemEl.getAttribute('data-root');
-  const item = state.artifacts.find(a => a.root === root);
-  if (!item) return;
-
-  const btn = e.target.closest('button[data-act]');
-  if (!btn) return;
+  const itemEl = e.target.closest('.bda-item'); if (!itemEl) return;
+  const item = state.artifacts.find(a => a.root === itemEl.getAttribute('data-root')); if (!item) return;
+  const btn = e.target.closest('button[data-act]'); if (!btn) return;
   const act = btn.getAttribute('data-act');
-  if (act === 'open') {
-    await openItem(item);
-  } else if (act === 'pin') {
-    await api('/api/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, pinned: !item.pinned }) });
-    await reload();
-  } else if (act === 'more') {
-    showActionsMenu(item, btn);
-  }
+  if (act === 'open') await openItem(item);
+  else if (act === 'pin') { await api('/api/update', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root: item.root, pinned: !item.pinned }) }); await reload(); }
+  else if (act === 'more') showActionsMenu(item, btn);
 };
 
-// 搜索框交互
-const qInput = document.getElementById('q');
-const clearSearchBtn = document.getElementById('clearSearch');
-qInput.oninput = () => {
-  state.search = qInput.value;
-  clearSearchBtn.className = state.search ? '' : 'hidden';
-  renderItems();
-};
-clearSearchBtn.onclick = () => {
-  qInput.value = '';
-  state.search = '';
-  clearSearchBtn.className = 'hidden';
-  qInput.focus();
-  renderItems();
-};
+const qInput = document.getElementById('q'), clearSearchBtn = document.getElementById('clearSearch');
+qInput.oninput = () => { state.search = qInput.value; clearSearchBtn.className = state.search ? '' : 'hidden'; renderItems(); };
+clearSearchBtn.onclick = () => { qInput.value = ''; state.search = ''; clearSearchBtn.className = 'hidden'; qInput.focus(); renderItems(); };
 window.addEventListener('keydown', (e) => {
-  if (e.key === '/' && document.activeElement !== qInput && !document.querySelector('.bda-scrim:not(.hidden)')) {
-    e.preventDefault();
-    qInput.focus();
-  } else if (e.key === 'Escape') {
-    if (!document.getElementById('dialogScrim').classList.contains('hidden')) {
-      closeDialog();
-    } else if (document.getElementById('menuLayer').innerHTML) {
-      closeMenu();
-    } else if (qInput.value) {
-      clearSearchBtn.click();
-    }
+  if (e.key === '/' && document.activeElement !== qInput && !document.querySelector('.bda-scrim:not(.hidden)')) { e.preventDefault(); qInput.focus(); }
+  else if (e.key === 'Escape') {
+    if (!document.getElementById('dialogScrim').classList.contains('hidden')) closeDialog();
+    else if (document.getElementById('menuLayer').innerHTML) closeMenu();
+    else if (qInput.value) clearSearchBtn.click();
   }
 });
-
-// 视图切换
-document.getElementById('viewModeBtn').onclick = () => {
-  state.viewMode = state.viewMode === 'grid' ? 'list' : 'grid';
-  writePreference('ps_view_mode', state.viewMode);
-  renderItems();
-};
-
-// 筛选按钮
-document.getElementById('filterBtn').onclick = (e) => {
-  showFilterMenu(e.currentTarget);
-};
-
-// 刷新按钮
-document.getElementById('reloadBtn').onclick = async () => {
-  await reload();
-  showToast(t('refreshed'));
-};
+document.getElementById('viewModeBtn').onclick = () => { state.viewMode = state.viewMode === 'grid' ? 'list' : 'grid'; writePreference('ps_view_mode', state.viewMode); renderItems(); };
+document.getElementById('filterBtn').onclick = (e) => showFilterMenu(e.currentTarget);
+document.getElementById('reloadBtn').onclick = async () => { await reload(); showToast(t('refreshed')); };
 
 async function reload() {
   try {
     const res = await api('/api/list');
     if (res.ok) {
+      state.loadedOnce = true;
       state.artifacts = res.artifacts || [];
+      state.types = res.types || [];
+      state.runtime = res.runtime || state.runtime;
       state.workspaceName = res.workspaceName || '';
       state.workspaceRoot = res.workspaceRoot || '';
       document.getElementById('wsLabel').textContent = state.workspaceName ? t('workspace') + state.workspaceName : '';
+      renderTiles();
       renderItems();
     }
   } catch (err) {
-    showToast(t('loadFailed') + err.message);
+    setTimeout(reload, 500);
   }
 }
 
-// Localized sections share the same render entry point.
 function renderExamples() {
   document.getElementById('examples').innerHTML = OFFICIAL_EXAMPLES.map(example =>
     '<li class="bda-example"><span class="bda-example-skill">' + typeIconSvg(example.skill, 16) + esc(skillText(example.skill, 'name')) + '</span>' +
     '<h3>' + esc(exampleText(example, 'title')) + '</h3><p>' + esc(exampleText(example, 'desc')) + '</p>' +
-    '<div class="bda-example-actions"><button type="button" class="bda-btn" data-act="preview" data-example="' + esc(example.id) + ('">' + t('preview') + '</button>') +
-    '<button type="button" class="bda-btn" data-primary="true" data-act="start" data-example="' + esc(example.id) + ('">' + t('recreate') + '</button></div></li>')).join('');
+    '<div class="bda-example-actions"><button type="button" class="bda-btn" data-act="preview" data-example="' + esc(example.id) + '">' + t('preview') + '</button>' +
+    '<button type="button" class="bda-btn" data-primary="true" data-act="start" data-example="' + esc(example.id) + '">' + t('recreate') + '</button></div></li>').join('');
 }
 function renderRecipes() {
-  const ul = document.getElementById('recipes');
-  ul.innerHTML = RECIPES.map(r =>
+  document.getElementById('recipes').innerHTML = RECIPES.map(r =>
     '<li><button type="button" class="bda-tile" data-recipe="' + esc(r.id) + '">' +
-    '<span class="bda-tile-art" style="min-height:40px;justify-content:flex-start">' +
-    '<span class="bda-tile-label" style="font-size:13px">' + esc(t('recipe.' + r.id + '.title')) + '</span>' +
-    '</span>' +
-    '<span class="bda-recipe-desc" style="padding:0 2px">' + esc(t('recipe.' + r.id + '.desc')) + '</span>' +
-    '</button></li>').join('');
+    '<span class="bda-tile-art" style="min-height:40px;justify-content:flex-start"><span class="bda-tile-label" style="font-size:13px">' + esc(recipeText(r, 'title')) + '</span></span>' +
+    '<span class="bda-recipe-desc" style="padding:0 2px">' + esc(recipeText(r, 'desc')) + '</span></button></li>').join('');
 }
 function renderAll() {
   document.documentElement.lang = locale();
@@ -2502,8 +2714,7 @@ document.getElementById('languageBtn').onclick = () => {
   const url = new URL(location.href);
   url.searchParams.set('lang', lang);
   history.replaceState(history.state, '', url);
-  closeMenu();
-  closeDialog();
+  closeMenu(); closeDialog();
   document.getElementById('toast').className = 'hidden';
   renderAll();
 };
@@ -2514,14 +2725,12 @@ reload();
 </html>`;
 }
 
-// 做同款：按已有作品的记录构造 starter 草稿，经 `orca agent launch` 在焦点工作区
-// 开一个新对话并自动发送（guizang「做同款」的 Orca 化）。失败把 starter 返回给前端，
-// 前端退化为剪贴板复制，主流程不断。
 function buildStarter(rec, skill) {
   return `${skill.prompt}与「${rec.title}」同款的新作。`
     + `请先查看参考项目 ${rec.root} 的主题、版式与风格，沿用同一套设计语言，仅替换为新内容。`
     + `新内容：`;
 }
+
 async function launchAgent(starter, agent) {
   const r = await new Promise((resolve) => {
     execFile(ORCA_BIN, [
@@ -2540,56 +2749,143 @@ async function launchAgent(starter, agent) {
     return { ok: true, outcome: 'launched', starter };
   }
 }
+
 function cleanAgentId(v) {
   return String(v || 'claude').replace(/[^a-z0-9-]/gi, '').slice(0, 32) || 'claude';
 }
+
 async function startFromArtifact(input) {
+  const agent = cleanAgentId(input.agent);
+  if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+  if (input.legacyMigrate) {
+    const starter = `请协助检查并无损转换升级旧版设计作品目录：${input.legacyMigrate}（类型：${input.skill || ''}）。\n先备份原文件后再修复格式差异。报错信息：${input.error || ''}`;
+    return launchAgent(starter, agent);
+  }
+  if (input.customPrompt) {
+    return launchAgent(String(input.customPrompt), agent);
+  }
   if (input.example) {
-    const example = OFFICIAL_EXAMPLES.find((x) => x.id === String(input.example));
+    const normEx = normalizeTypeId(input.example);
+    const example = OFFICIAL_EXAMPLES.find((x) => x.id === normEx);
     if (!example) return { ok: false, error: '未知官方示例' };
-    if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
     const starter = `${SKILL_BY_ID[example.skill].prompt}${example.desc}\n参考示例 ${example.points}。请在当前工作区 .design/ 内创建新项目。`;
-    return launchAgent(starter, cleanAgentId(input.agent));
+    return launchAgent(starter, agent);
   }
   if (input.recipe) {
     const r = RECIPES.find((x) => x.id === String(input.recipe));
     if (!r) return { ok: false, error: '未知工作流' };
-    if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
-    return launchAgent(r.template, cleanAgentId(input.agent));
+    return launchAgent(r.template, agent);
   }
   const root = String(input.root || '');
   const rec = findArtifact(root);
-  if (!rec) return { ok: false, error: '未找到该作品的记录' };
-  const skill = SKILL_BY_ID[rec.skill];
-  if (!skill) return { ok: false, error: `未知技能: ${rec.skill}` };
-  if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
-  return launchAgent(buildStarter(rec, skill), cleanAgentId(input.agent));
+  const skillId = normalizeTypeId(rec?.skill || input.skill);
+  const skill = SKILL_BY_ID[skillId];
+  if (!skill) return { ok: false, error: `未知作品类型: ${skillId || rec?.skill || ''}` };
+  return launchAgent(buildStarter(rec || { root, title: input.title || path.basename(root) }, skill), agent);
 }
 
-const server = http.createServer((req, res) => {
+const chunkUploads = new Map();
+
+function inspectOatypePackage(filePath) {
+  const resolved = path.resolve(String(filePath || ''));
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    return { ok: false, error: `.oatype 文件不存在: ${resolved}` };
+  }
+  const buf = fs.readFileSync(resolved);
+  const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+  const entries = parseTarGzBuffer(buf);
+  const manifestEntry = entries.find((e) => e.path === 'artifact-type.json');
+  if (!manifestEntry) return { ok: false, error: '.oatype 缺少 artifact-type.json' };
+  const manifest = JSON.parse(manifestEntry.data.toString('utf8'));
+  const id = manifest.slug || manifest.name || path.basename(resolved).replace(/-\d+\.\d+\.\d+.*$/, '');
+  const skillEntry = entries.find((e) => e.path === (manifest.skill || 'SKILL.md'));
+  return {
+    ok: true,
+    id,
+    version: manifest.version || '0.1.0',
+    sha256,
+    capabilities: manifest.openArtifact?.uses || [],
+    network: manifest.openArtifact?.network || [],
+    skillMd: skillEntry ? skillEntry.data.toString('utf8').slice(0, 4000) : '',
+    entries,
+  };
+}
+
+function installOatypePackage(filePath) {
+  const info = inspectOatypePackage(filePath);
+  if (!info.ok) return info;
+  const destDir = path.join(openArtifactHome(), 'types', info.id);
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const e of info.entries) {
+    const target = path.resolve(destDir, e.path);
+    if (!target.startsWith(path.resolve(destDir) + path.sep)) continue;
+    if (e.type === 'dir') { fs.mkdirSync(target, { recursive: true }); continue; }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, e.data);
+  }
+  return { ok: true, id: info.id, version: info.version, dir: destDir };
+}
+
+const sseClients = new Set();
+onRuntimeProgress((ev) => {
+  const line = `data: ${JSON.stringify(ev)}\n\n`;
+  for (const res of sseClients) {
+    try { res.write(line); } catch { sseClients.delete(res); }
+  }
+});
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   res.setHeader('content-type', url.pathname === '/' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8');
-  const allowedGet = ['/', '/api/list', '/api/preview', '/api/thumb'];
-  // 所有状态变更都走 POST + guardPost；/api/open 会拉起编辑器，/api/open-url 会跳转，
-  // 二者留在 GET 白名单会让跨站页面绕过收口（simple request 不触发 CORS 预检）。
-  const allowedPost = ['/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/start', '/api/register', '/api/forget'];
-  if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
-    res.statusCode = 404; return res.end('{}');
-  }
-  // POST 收口：跨站 text/plain 伪装 POST（免预检通道）在此拒绝
-  if (req.method === 'POST') {
-    const g = guardPost(req);
-    if (g) { res.statusCode = g; return res.end('{}'); }
-  }
-  const finish = (v) => res.end(JSON.stringify(v));
+
+  const allowedGet = [
+    '/', '/api/health', '/api/list', '/api/preview', '/api/thumb',
+    '/api/types', '/api/runtime/status', '/api/runtime/events',
+    '/vendor/harness-embed.mjs',
+  ];
+  const allowedPost = [
+    '/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore',
+    '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor',
+    '/api/start', '/api/register', '/api/forget',
+    '/api/runtime/retry', '/api/runtime/import',
+    '/api/types/toggle', '/api/types/trust-project', '/api/types/install',
+  ];
+  const isOaProxy = url.pathname.startsWith('/api/open-artifact.');
 
   if (req.method === 'GET') {
+    if (!allowedGet.includes(url.pathname) && !isOaProxy) {
+      res.statusCode = 404; return res.end('{}');
+    }
     if (url.pathname === '/') return res.end(galleryHtml(url.searchParams.get('lang'), url.searchParams.get('scheme')));
-    if (url.pathname === '/api/list') return finish(listArtifactsViews());
+    if (url.pathname === '/api/health') return res.end(JSON.stringify({ ok: true }));
+    if (url.pathname === '/vendor/harness-embed.mjs') {
+      res.setHeader('content-type', 'application/javascript; charset=utf-8');
+      return res.end(fs.readFileSync(path.join(pluginRoot, 'src', 'vendor', 'harness-embed.mjs')));
+    }
+    if (url.pathname === '/api/list') return res.end(JSON.stringify(await listArtifactsViewsAsync()));
+    if (url.pathname === '/api/types') return res.end(JSON.stringify(await listTypesInfo(readState().workspaceRoot)));
+    if (url.pathname === '/api/runtime/status') return res.end(JSON.stringify({ ok: true, ...getRuntimeStatus() }));
+    if (url.pathname === '/api/runtime/events') {
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive' });
+      res.write(`data: ${JSON.stringify(getRuntimeStatus())}\n\n`);
+      sseClients.add(res);
+      req.on('close', () => sseClients.delete(res));
+      return;
+    }
+    if (isOaProxy) {
+      const name = url.pathname.slice('/api/open-artifact.'.length);
+      const query = Object.fromEntries(url.searchParams.entries());
+      try {
+        const out = await callDaemonApi(name, undefined, { method: 'GET', query });
+        return res.end(JSON.stringify(out));
+      } catch (err) {
+        res.statusCode = 502;
+        return res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    }
     const skill = url.searchParams.get('skill') || '';
     const root = url.searchParams.get('root') || '';
     if (url.pathname === '/api/preview' || url.pathname === '/api/thumb') {
-      // 只读已登记记录或工作区 .design/ 内的 root，防任意文件读取
       const allowed = allowedArtifactRoot(root);
       const isThumb = url.pathname === '/api/thumb';
       const file = allowed ? (isThumb ? thumbPath(root) : previewEntry(root, skill)) : null;
@@ -2600,11 +2896,16 @@ const server = http.createServer((req, res) => {
         return res.end(content);
       } catch { res.statusCode = 404; return res.end(); }
     }
-    return finish({ ok: false, error: 'unknown GET route' });
+    return res.end(JSON.stringify({ ok: false, error: 'unknown GET route' }));
   }
 
-  // POST 请求体上限：Content-Length 提前回 413；chunked 在累计超限后回一次 413。
-  // 原实现只 destroy()，客户端拿到的是 socket 断开而不是可判定的 HTTP 状态。
+  if (req.method !== 'POST' || (!allowedPost.includes(url.pathname) && !isOaProxy)) {
+    res.statusCode = 404; return res.end('{}');
+  }
+  const g = guardPost(req);
+  if (g) { res.statusCode = g; return res.end('{}'); }
+
+  const finish = (v) => res.end(JSON.stringify(v));
   const declared = Number(req.headers['content-length']);
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     req.resume();
@@ -2619,11 +2920,23 @@ const server = http.createServer((req, res) => {
   });
   req.on('end', async () => {
     if (tooLarge) { res.statusCode = 413; return res.end('{}'); }
-    let input = {}; try {
+    let input = {};
+    try {
       const parsed = JSON.parse(body || '{}');
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed;
     } catch {}
     const skill = input.skill || '', root = input.root || '';
+
+    if (isOaProxy) {
+      const name = url.pathname.slice('/api/open-artifact.'.length);
+      try {
+        const out = await callDaemonApi(name, input, { method: 'POST', start: true });
+        return finish(out);
+      } catch (err) {
+        res.statusCode = 502;
+        return finish({ ok: false, error: err.message });
+      }
+    }
 
     if (url.pathname === '/api/register') {
       const result = registerArtifact(input);
@@ -2637,7 +2950,7 @@ const server = http.createServer((req, res) => {
     }
     if (url.pathname === '/api/open') {
       const r = await openSkillEditor(skill, root);
-      if (!r.ok) res.statusCode = 400;
+      if (!r.ok && !r.code) res.statusCode = 400;
       return finish(r);
     }
     if (url.pathname === '/api/start') return finish(await startFromArtifact(input));
@@ -2652,22 +2965,34 @@ const server = http.createServer((req, res) => {
       }
     }
     if (url.pathname === '/api/update') {
-      const rec = findArtifact(root);
+      let rec = findArtifact(root);
+      if (!rec && allowedArtifactRoot(root)) {
+        const regRes = registerArtifact({ skill: skill || 'design', root, title: input.title });
+        if (regRes.ok) rec = regRes.record;
+      }
       if (!rec) return finish({ ok: false, error: 'not recorded' });
       if (typeof input.pinned === 'boolean') rec.pinned = input.pinned;
       if (input.title) {
         const clean = cleanTitle(input.title);
         if (clean) await renameArtifact(rec.skill, root, clean);
+        rec.title = clean || rec.title;
       }
       writeRecord(rec);
+      if (rec.id && typeof input.pinned === 'boolean') {
+        await callDaemonApi('artifacts.update', { id: rec.id, pinned: input.pinned }).catch(() => {});
+      }
       return finish({ ok: true, record: rec });
     }
     if (url.pathname === '/api/delete') {
-      const rec = findArtifact(root);
+      let rec = findArtifact(root);
+      if (!rec && allowedArtifactRoot(root)) {
+        const scanned = scanDesignProjects(readState().workspaceRoot || '').find((x) => x.root === root);
+        if (scanned) rec = { v: 1, root, skill: scanned.skill, title: scanned.title, openedAt: new Date().toISOString() };
+      }
       if (!rec) return finish({ ok: false, error: 'not recorded' });
       try {
-        await stopSkillEditor(rec.skill, root);
-        const out = trashArtifact(rec);
+        if (rec.id) await callDaemonApi('artifacts.delete', { id: rec.id }).catch(() => {});
+        const out = trashArtifact(rec, { moveFolder: input.moveFolder === true });
         return finish({ ok: true, ...out });
       } catch (e) {
         return finish({ ok: false, error: e.message });
@@ -2676,6 +3001,7 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/api/restore') {
       try {
         const rec = restoreArtifact(input.id || '');
+        if (rec.id) await callDaemonApi('artifacts.restore', { id: rec.id }).catch(() => {});
         return finish({ ok: true, record: rec });
       } catch (e) {
         return finish({ ok: false, error: e.message });
@@ -2692,8 +3018,63 @@ const server = http.createServer((req, res) => {
         return finish({ ok: false, error: e.message });
       }
     }
-    if (url.pathname === '/api/stop') return finish(await stopSkillEditor(skill, root));
-    if (url.pathname === '/api/restart-editor') return finish(await restartEditor(skill, root));
+    if (url.pathname === '/api/runtime/retry') {
+      ensureRuntime().catch(() => {});
+      return finish({ ok: true, runtime: getRuntimeStatus() });
+    }
+    if (url.pathname === '/api/runtime/import') {
+      if (typeof input.uploadId === 'string' && Number.isInteger(input.chunkIndex) && Number.isInteger(input.totalChunks)) {
+        let entry = chunkUploads.get(input.uploadId);
+        if (!entry) {
+          entry = { chunks: new Array(input.totalChunks), received: 0, fileName: input.fileName || 'upload.tgz' };
+          chunkUploads.set(input.uploadId, entry);
+        }
+        entry.chunks[input.chunkIndex] = Buffer.from(String(input.dataBase64 || ''), 'base64');
+        entry.received++;
+        if (entry.received < input.totalChunks) {
+          return finish({ ok: true, pending: true, received: entry.received, totalChunks: entry.totalChunks });
+        }
+        chunkUploads.delete(input.uploadId);
+        const full = Buffer.concat(entry.chunks);
+        return finish(await importOfflineTarball({ buffer: full, fileName: entry.fileName }));
+      }
+      return finish(await importOfflineTarball({ filePath: input.filePath, base64: input.base64, fileName: input.fileName }));
+    }
+    if (url.pathname === '/api/types/toggle') {
+      const id = String(input.id || '').trim();
+      if (!id) return finish({ ok: false, error: 'missing type id' });
+      const s = readOaSettings();
+      const set = new Set(Array.isArray(s.disabledTypes) ? s.disabledTypes : []);
+      if (input.enabled === false) set.add(id); else set.delete(id);
+      writeOaSettings({ ...s, disabledTypes: [...set] });
+      return finish({ ok: true, disabledTypes: [...set] });
+    }
+    if (url.pathname === '/api/types/trust-project') {
+      const ws = path.resolve(String(input.workspace || readState().workspaceRoot || ''));
+      if (!ws) return finish({ ok: false, error: 'missing workspace' });
+      const s = readOaSettings();
+      const list = new Set((Array.isArray(s.trustedProjects) ? s.trustedProjects : []).map((p) => path.resolve(p)));
+      list.add(ws);
+      writeOaSettings({ ...s, trustedProjects: [...list] });
+      return finish({ ok: true, trustedProjects: [...list] });
+    }
+    if (url.pathname === '/api/types/install') {
+      try {
+        if (input.preview) {
+          const prev = inspectOatypePackage(input.filePath);
+          if (!prev.ok) return finish(prev);
+          const { entries: _entries, ...rest } = prev;
+          return finish(rest);
+        }
+        if (input.confirm !== true) return finish({ ok: false, error: '需要 confirm: true 二次确认' });
+        return finish(installOatypePackage(input.filePath));
+      } catch (e) {
+        return finish({ ok: false, error: e.message });
+      }
+    }
+    if (url.pathname === '/api/stop' || url.pathname === '/api/restart-editor') {
+      return finish({ ok: true });
+    }
     if (url.pathname === '/api/restart') {
       finish({ ok: true, restarting: true });
       server.close(() => {
@@ -2710,6 +3091,7 @@ const server = http.createServer((req, res) => {
 
 export {
   listArtifactsViews,
+  listArtifactsViewsAsync,
   openSkillEditor,
   trashArtifact,
   restoreArtifact,
@@ -2718,10 +3100,13 @@ export {
   galleryHtml,
   findArtifact,
   writeRecord,
+  GALLERY_STR,
+  dshHome,
   server,
 };
 
 if (process.argv[1] === __filename) {
+  migrateLegacyDesignHome();
   server.on('error', (e) => console.error('gallery server error:', e.message));
   server.listen(PORT, '127.0.0.1', () => console.log(`gallery listening on ${PORT}`));
 }
