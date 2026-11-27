@@ -7,7 +7,8 @@ import { execFileSync } from 'node:child_process';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const WORKER_PATH = path.join(REPO_ROOT, 'src', 'worker.js');
-const GALLERY_URL = 'http://127.0.0.1:3480/';
+const GALLERY_PORT = 39400 + Math.floor(Math.random() * 200);
+const GALLERY_URL = `http://127.0.0.1:${GALLERY_PORT}/`;
 const GALLERY_SCRIPT = path.join(REPO_ROOT, 'src', 'gallery-server.mjs');
 
 function makeSandbox() {
@@ -113,7 +114,7 @@ async function activateWorker({ cliPath, stateFile, profileDb, workspaceRoot, wo
   process.env.ORCA_PROFILE_DB = profileDb;
   process.env.ORCA_DESIGN_HOME = path.join(path.dirname(stateFile), 'design-home');
   process.env.ORCA_GALLERY_SCRIPT = '/dev/null';
-  process.env.ORCA_GALLERY_PORT = '3480';
+  process.env.ORCA_GALLERY_PORT = String(GALLERY_PORT);
   fs.mkdirSync(process.env.ORCA_DESIGN_HOME, { recursive: true });
   const { orca, handlers, events, focus } = makeHost({ workspaceRoot, workspaceName, captureEvents });
   const workerMod = await import(new URL(`../src/worker.js?test=${++importCounter}`, import.meta.url).href);

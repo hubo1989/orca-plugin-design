@@ -59,10 +59,13 @@ test('AC-6: design-system singleton (DESIGN_SYSTEM_EXISTS) and duplicate name -2
 
   const s1 = await post('/api/create', { skill: 'claude-slides', name: 'demo' });
   const s2 = await post('/api/create', { skill: 'claude-slides', name: 'demo' });
+  const s3 = await post('/api/create', { skill: 'claude-slides', name: 'demo' });
   assert.equal(path.basename(s1.json.root), 'demo');
   assert.equal(path.basename(s2.json.root), 'demo-2');
+  assert.equal(path.basename(s3.json.root), 'demo-3');
   assert.equal(fs.existsSync(path.join(s1.json.root, 'project', 'deck.json')), true);
   assert.equal(fs.existsSync(path.join(s2.json.root, 'project', 'deck.json')), true);
+  assert.equal(fs.existsSync(path.join(s3.json.root, 'project', 'deck.json')), true);
 
   const c1 = await post('/api/create', { skill: 'claude-design', name: 'demo-canvas' });
   const c2 = await post('/api/create', { skill: 'claude-design', name: 'demo-canvas' });
@@ -120,6 +123,22 @@ test('AC-8: rename syncs physical directory name (with -2 collision) and JSON ti
   assert.equal(path.basename(rDash.json.root), 'Sales-Board');
   const dashMeta = JSON.parse(fs.readFileSync(path.join(rDash.json.root, 'db', 'dash', 'meta.json'), 'utf8'));
   assert.equal(dashMeta.title, 'Sales Board');
+
+  // Slides & Motion rename
+  const slideCreated = await post('/api/create', { skill: 'claude-slides', name: 'old-slide' });
+  const rSlide = await post('/api/rename', { skill: 'claude-slides', root: slideCreated.json.root, title: 'Pitch Deck' });
+  assert.equal(rSlide.json.ok, true);
+  assert.equal(path.basename(rSlide.json.root), 'Pitch-Deck');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(rSlide.json.root, 'project', 'deck.json'), 'utf8')).title, 'Pitch Deck');
+
+  const motionRoot = path.join(wsDir, '.design', 'old-motion');
+  fs.mkdirSync(path.join(motionRoot, 'db', 'film'), { recursive: true });
+  fs.writeFileSync(path.join(motionRoot, 'db', 'film', 'meta.json'), JSON.stringify({ title: 'Old Motion', scenes: ['s1'] }));
+  await post('/api/register', { skill: 'claude-motion', root: motionRoot, title: 'Old Motion' });
+  const rMotion = await post('/api/rename', { skill: 'claude-motion', root: motionRoot, title: 'Launch Film' });
+  assert.equal(rMotion.json.ok, true);
+  assert.equal(path.basename(rMotion.json.root), 'Launch-Film');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(rMotion.json.root, 'db', 'film', 'meta.json'), 'utf8')).title, 'Launch Film');
 });
 
 test('AC-9: dashboard/motion reject empty scaffold, support /api/start {skill} + clipboard fallback, and UI activeWorkspaceDesignSystem ignores lakala naming', async () => {
@@ -265,6 +284,24 @@ test('Review fixes: mixed-folder undo survives second deletion, stale unresolved
   const updBlocked = await post('/api/update', { root: mixed1.json.root, pinned: true });
   assert.equal(updBlocked.status, 403);
   assert.equal(updBlocked.json.code, 'NO_WORKSPACE');
+
+  // 3. REMOTE_OR_UNMOUNTED & FORBIDDEN_WORKSPACE_PATH block POST /api/create without cwd fallback
+  for (const [errCode, badWs] of [
+    ['REMOTE_OR_UNMOUNTED', 'ssh-remote://host/repo'],
+    ['FORBIDDEN_WORKSPACE_PATH', '/System'],
+  ]) {
+    fs.writeFileSync(stateFile, JSON.stringify({
+      workspaceRoot: '',
+      workspaceName: '',
+      errorCode: errCode,
+      errorMessage: `${errCode}: ${badWs}`,
+      updatedAt: Date.now(),
+    }));
+    const createBlocked = await post('/api/create', { skill: 'claude-slides', name: 'should-not-create' });
+    assert.equal(createBlocked.json.ok, false);
+    assert.equal(createBlocked.json.code, errCode);
+    assert.equal(fs.existsSync(path.join(process.cwd(), '.design')), false);
+  }
 
   // Restore valid workspace state for cleanup
   fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot: wsDir, workspaceName: 'workspace', updatedAt: Date.now() }));
