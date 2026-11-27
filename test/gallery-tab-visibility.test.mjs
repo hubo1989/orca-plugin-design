@@ -104,27 +104,29 @@ function makeHost({ workspaceRoot, workspaceName, captureEvents = false }) {
 }
 
 let importCounter = 0;
+const activeHandles = [];
 async function activateWorker({ cliPath, stateFile, profileDb, workspaceRoot, workspaceName, captureEvents = false }) {
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-  fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot, workspaceName }));
+  fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot, workspaceName, updatedAt: Date.now() }));
   process.env.ORCA_CLI_COMMAND = cliPath;
   process.env.ORCA_STATE_FILE = stateFile;
   process.env.ORCA_PROFILE_DB = profileDb;
   process.env.ORCA_DESIGN_HOME = path.join(path.dirname(stateFile), 'design-home');
   process.env.ORCA_GALLERY_SCRIPT = '/dev/null';
+  process.env.ORCA_GALLERY_PORT = '3480';
   fs.mkdirSync(process.env.ORCA_DESIGN_HOME, { recursive: true });
-  // worker 自己会 spawn gallery-server；测试里用不可达端口替代真实 spawn 的副作用由
-  // ensureGallery 的 fire-and-forget + detached child 承担，/dev/null 让脚本立即退出。
-  const source = fs.readFileSync(WORKER_PATH, 'utf8')
-    .replace("const GALLERY_SCRIPT = path.join(pluginRoot, 'src', 'gallery-server.mjs');", "const GALLERY_SCRIPT = process.env.ORCA_GALLERY_SCRIPT || path.join(pluginRoot, 'src', 'gallery-server.mjs');");
-  const stagedWorker = path.join(path.dirname(stateFile), `worker-${++importCounter}.mjs`);
-  fs.writeFileSync(stagedWorker, source.replace("from './skills-meta.mjs'", `from ${JSON.stringify(path.join(REPO_ROOT, 'src', 'skills-meta.mjs'))}`));
   const { orca, handlers, events, focus } = makeHost({ workspaceRoot, workspaceName, captureEvents });
-  await (await import(new URL(`file://${stagedWorker}`).href)).default(orca);
+  const workerMod = await import(new URL(`../src/worker.js?test=${++importCounter}`, import.meta.url).href);
+  const handle = await workerMod.default(orca);
+  if (handle?.dispose) activeHandles.push(handle);
   const gallery = handlers.get('prototype.gallery');
   assert.ok(gallery, 'prototype.gallery 未注册');
   return { gallery, events, focus, stateFile };
 }
+
+test.after(() => {
+  for (const h of activeHandles) h.dispose();
+});
 
 function assertScoped(calls, workspaceRoot) {
   const scopedCalls = calls.filter((args) => args[0] === 'tab' || args[0] === 'worktree');
@@ -157,6 +159,7 @@ test('gallery 首次创建：解析 page id、switch/focus、current 校验，�
   assert.ok(calls.some((args) => args[0] === 'worktree' && args[1] === 'activate'), '未先激活焦点工作区');
   assert.ok(calls.some((args) => args[1] === 'switch' && args.includes('created-page') && args.includes('--focus')));
   assert.ok(calls.some((args) => args[1] === 'current'));
+  assert.ok(calls.filter((args) => args[0] === 'tab' && args[1] === 'list').length <= 1, '单次打开最多执行 1 次 tab list');
 });
 
 test('gallery 缓存复用：switch 后 current 不匹配时不得返回 ok:true', async () => {

@@ -3,9 +3,12 @@
   "version": "0.2.1",
   "private": true,
   "type": "module",
-  "description": "Lakala-Design-Plugin custom editor plugin for Orca",
+  "description": "Lakala-Design-Plugin custom editor plugin for Orca & LKL-PMStudio",
   "scripts": {
-    "test": "node --test 'test/**/*.mjs'",
+    "test": "node -e \"const cp=require('node:child_process'),fs=require('node:fs'),p=require('node:path');const files=fs.readdirSync('test').filter(f=>f.endsWith('.test.mjs')||f.endsWith('.test.js')).sort().map(f=>p.join('test',f));process.exit(cp.spawnSync(process.execPath,['--test',...files],{stdio:'inherit',env:{...process.env,ORCA_DESIGN_TEST_MODE:'1'}}).status??1)\"",
+    "smoke": "node test/smoke-gallery.mjs",
+    "sync:page": "node tools/sync-gallery-page.mjs",
+    "vendor:check": "node tools/vendor-baoyu.mjs --check",
     "package": "bash bin/package.sh",
     "package:full": "bash bin/package.sh --full"
   },

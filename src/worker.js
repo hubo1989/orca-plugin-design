@@ -1,4 +1,6 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import http from 'node:http';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -12,16 +14,38 @@ import {
   EXAMPLE_INDEX,
   resolveHostCli,
   resolveHostUserData,
+  resolveHostRuntimeDefaults,
   resolveProfileDb,
   computeGalleryBuildId,
 } from './skills-meta.mjs';
+import {
+  resolveOrcaWorkspace,
+  validateWorkspacePath,
+  isForbiddenWorkspacePath,
+  formatWorkspaceError,
+} from './workspace-guard.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
+const HOST_RUNTIME = resolveHostRuntimeDefaults(pluginRoot);
+const APP_ID = process.env.ORCA_GALLERY_APP_ID?.trim() || HOST_RUNTIME.appId;
 
-const HOST_USER_DATA = resolveHostUserData(pluginRoot);
-const ORCA_BIN = resolveHostCli(pluginRoot);
-const EXPECTED_BUILD_ID = computeGalleryBuildId(pluginRoot);
+function cleanTitle(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+function sanitizeDirSlug(raw) {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/[\\/:*?"<>|\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/g, '');
+  if (!s || s === '.' || s === '..') return '';
+  return s;
+}
 
 // Design skills vendored from JimLiu/baoyu-design.
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
@@ -42,16 +66,6 @@ function runNode(args) {
   });
 }
 
-// Orca CLI 通用执行器（tab list/switch/current 用）。错误一律 resolve、绝不 reject，
-// 让 tab 复用检查的任何失败都退化为“新建 tab”路径，而不是让命令失败。
-function orcaTab(args, timeout = 3000) {
-  return new Promise((resolve) => {
-    execFile(ORCA_BIN, args, { timeout }, (err, stdout, stderr) => {
-      resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') });
-    });
-  });
-}
-
 // CLI 偶有前后缀日志；优先整体解析，失败时截取第一个 JSON 对象。
 function parseOrcaJson(stdout) {
   const text = String(stdout || '').trim();
@@ -63,50 +77,59 @@ function parseOrcaJson(stdout) {
     try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
   }
 }
+
 function orcaResult(payload) {
   return payload && payload.ok === false ? null : (payload?.result ?? null);
 }
-function focusedFromHostContext(ctx, workspaces) {
-  // readContext 不带 path；用它返回的 branch/displayName 在 workspace.list 中唯一命中。
-  // 这不是猜测：两个字段都来自宿主当前焦点上下文，且只有唯一候选才接受。
-  if (!ctx || !Array.isArray(workspaces)) return null;
-  const branch = String(ctx.branch || '');
-  const name = String(ctx.displayName || '');
-  const normalizeBranch = (b) => String(b || '').replace(/^refs\/heads\//, '');
-  const candidates = workspaces.filter((w) =>
-    normalizeBranch(w.branch) === normalizeBranch(branch) && String(w.name || '') === name);
-  return candidates.length === 1 ? candidates[0] : null;
-}
+
 function browserPageId(result) {
   return result?.browserPageId || result?.tab?.browserPageId || result?.tabId || null;
 }
 
-function orcaTabCreate(url, worktreePath, { split = false } = {}) {
-  // 显式 --worktree：不指定时 CLI 走“当前工作区”解析，在远程/非本机工作区
-  // 场景会挂起或落到错误宿主。--json 让调用方拿到 browserPageId 做可见性校验。
-  const args = ['tab', 'create', '--url', url, '--json'];
-  // --split right 只把页面开在终端旁的新 pane 且焦点留在终端；项目库点击不用它。
-  if (split) args.push('--split', 'right');
-  if (worktreePath) args.push('--worktree', `path:${worktreePath}`);
-  return new Promise((resolve) => {
-    execFile(ORCA_BIN, args, { timeout: 8000 }, (err, stdout, stderr) => {
-      if (err) {
-        resolve({ pageId: null, error: `${err.message}${stderr ? ` :: ${String(stderr).slice(0, 200)}` : ''}` });
-        return;
-      }
-      const result = orcaResult(parseOrcaJson(stdout));
-      const pageId = browserPageId(result);
-      if (!pageId) {
-        resolve({ pageId: null, error: `tab create returned no browserPageId: ${String(stdout).slice(0, 200)}` });
-        return;
-      }
-      resolve({ pageId, error: null });
-    });
-  });
-}
-
 export default async function activate(orca) {
   orca.log('Lakala-Design-Plugin worker activating...');
+
+  const HOST_USER_DATA = resolveHostUserData(pluginRoot);
+  const ORCA_BIN = resolveHostCli(pluginRoot);
+  const EXPECTED_BUILD_ID = computeGalleryBuildId(pluginRoot);
+  const DESIGN_HOME = process.env.ORCA_DESIGN_HOME?.trim() || process.env.DSH_HOME?.trim() || path.join(HOST_USER_DATA, 'baoyu-design');
+  const validateOpts = { pluginRoot, hostUserData: HOST_USER_DATA, designHome: DESIGN_HOME };
+
+  const GALLERY_PORT = Number(process.env.ORCA_GALLERY_PORT || process.env.PORT) || HOST_RUNTIME.defaultPort;
+  const GALLERY_URL = `http://127.0.0.1:${GALLERY_PORT}/`;
+  const GALLERY_SCRIPT = process.env.ORCA_GALLERY_SCRIPT || path.join(pluginRoot, 'src', 'gallery-server.mjs');
+  const STARTUP_TIMEOUT_MS = Number(process.env.ORCA_STARTUP_TIMEOUT_MS) || 8000;
+  const HEALTH_POLL_INTERVAL_MS = 60;
+  const SUCCESS_THROTTLE_MS = 2000;
+
+  function orcaTab(args, timeout = 3000) {
+    return new Promise((resolve) => {
+      execFile(ORCA_BIN, args, { timeout }, (err, stdout, stderr) => {
+        resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') });
+      });
+    });
+  }
+
+  function orcaTabCreate(url, worktreePath, { split = false } = {}) {
+    const args = ['tab', 'create', '--url', url, '--json'];
+    if (split) args.push('--split', 'right');
+    if (worktreePath) args.push('--worktree', `path:${worktreePath}`);
+    return new Promise((resolve) => {
+      execFile(ORCA_BIN, args, { timeout: 8000 }, (err, stdout, stderr) => {
+        if (err) {
+          resolve({ pageId: null, error: `${err.message}${stderr ? ` :: ${String(stderr).slice(0, 200)}` : ''}` });
+          return;
+        }
+        const result = orcaResult(parseOrcaJson(stdout));
+        const pageId = browserPageId(result);
+        if (!pageId) {
+          resolve({ pageId: null, error: `tab create returned no browserPageId: ${String(stdout).slice(0, 200)}` });
+          return;
+        }
+        resolve({ pageId, error: null });
+      });
+    });
+  }
 
   // 系统性保险：处理器异常一律转 {ok:false,error}，绝不让 rejection 冒泡到宿主
   // （Orca 只会弹“运行失败”且不给出错信息）。宿主的 orca.commands/panels 是冻结对象，
@@ -137,31 +160,34 @@ export default async function activate(orca) {
     cachedPageWsRoot = '';
   }
 
-// 真实安装路径：宿主把插件复制到 <userData>/plugins/<pluginKey>/<hash>/。
-// 只有工作区等于/位于安装根目录内部时才拒绝写入；源码 worktree、dist 打包源都不是安装路径。
-function installRoot() {
-  return path.join(HOST_USER_DATA, 'plugins');
-}
-function isInstalledPluginPath(target) {
-  const root = path.resolve(installRoot());
-  const p = path.resolve(String(target || ''));
-  return p === root || p.startsWith(root + path.sep);
-}
+  function isInstalledPluginPath(target) {
+    return isForbiddenWorkspacePath(target, validateOpts);
+  }
 
-  const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
-  // 点击时把实时焦点写入短时效 state；库页服务优先消费它，避免读旧 profile DB。
-  function writeState(root = workspaceRoot, name = workspaceName) {
-    if (!root) return;
-    const tmp = `${STATE_FILE}.tmp`;
+  const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), HOST_RUNTIME.defaultStateFileName);
+  // 点击时把实时焦点写入短时效 state；被拦截或未识别时同步清空快照，防止写串旧工作区。
+  function writeState(root = workspaceRoot, name = workspaceName, errInfo = null) {
+    const tmp = `${STATE_FILE}.${process.pid}.tmp`;
+    const payload = root
+      ? {
+          workspaceRoot: root,
+          workspaceName: name || path.basename(root) || '',
+          errorCode: '',
+          errorMessage: '',
+          updatedAt: Date.now(),
+        }
+      : {
+          workspaceRoot: '',
+          workspaceName: '',
+          errorCode: errInfo?.code || errInfo?.reason || 'NO_WORKSPACE',
+          errorMessage: errInfo?.message || formatWorkspaceError('NO_WORKSPACE'),
+          updatedAt: Date.now(),
+        };
     try {
       fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-      fs.writeFileSync(tmp, JSON.stringify({
-        workspaceRoot: root,
-        workspaceName: name || path.basename(root) || '',
-        updatedAt: Date.now(),
-      }));
+      fs.writeFileSync(tmp, JSON.stringify(payload));
       fs.renameSync(tmp, STATE_FILE);
-    } catch { /* 库页服务仍可回退 profile DB；不能让状态文件失败拖垮命令 */ }
+    } catch { /* 不能让状态文件失败拖垮命令 */ }
   }
 
   async function refreshWorkspaces() {
@@ -172,11 +198,9 @@ function isInstalledPluginPath(target) {
     } catch {
       openedWorkspaces = [];
     }
+    return openedWorkspaces;
   }
 
-  // agent.status.changed 事件自带 workspaceId + terminalId，而 readContext.terminals
-  // 恰是焦点工作区的终端 id：以终端 id 为桥，可精确反查焦点工作区（官方 API，
-  // 无名称猜测）。仅在焦点工作区从未跑过 agent 时退回唯一字段匹配。
   const terminalWorkspace = new Map();
 
   function rememberAgentEvent(e) {
@@ -187,93 +211,30 @@ function isInstalledPluginPath(target) {
     }
   }
 
-  function matchWorkspaceId(rawId) {
-    const s = String(rawId);
-    const pathPart = s.includes('::') ? s.split('::').pop() : null;
-    return openedWorkspaces.find((w) => w.id === s || (pathPart && w.path === pathPart)) || null;
-  }
-
-  // 焦点解析优先读宿主 profile 库的 activeWorktreeId（权威、即时，格式 <uuid>::<path>），
-  // 消除 agent 事件桥接的冷启动等待；事件桥与唯一字段匹配仅作回退。
   const PROFILE_DB = resolveProfileDb(pluginRoot);
 
-  function focusedFromProfile() {
-    try {
-      const out = execFileSync('sqlite3', [PROFILE_DB,
-        "SELECT payload FROM profile_state_documents WHERE domain='workspaceSession'"],
-        { timeout: 3000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-      const ws = JSON.parse(out);
-      const id = ws.activeWorktreeId || '';
-      const p = id.includes('::') ? id.split('::').pop() : '';
-      if (!p) return null;
-      return { path: p, name: path.basename(p) || '' };
-    } catch {
-      return null;
-    }
+  async function resolveWorkspace({ live = false } = {}) {
+    return resolveOrcaWorkspace({
+      live,
+      listWorkspaces: refreshWorkspaces,
+      readContext: () => orca.host.call('workspace.readContext').catch(() => null),
+      queryWorktreePs: async () => {
+        const r = await orcaTab(['worktree', 'ps', '--json'], 3000);
+        if (r.err) return [];
+        return orcaResult(parseOrcaJson(r.stdout))?.worktrees || [];
+      },
+      profileDbPath: PROFILE_DB,
+      terminalWorkspaceMap: terminalWorkspace,
+      validateOptions: validateOpts,
+    });
   }
 
-  async function resolveFocusedWorkspace() {
-    // ① 权威：profile 库 activeWorktreeId（与 workspace.list 交叉确认存在）
-    await refreshWorkspaces();
-    const fromProfile = focusedFromProfile();
-    if (fromProfile) {
-      const known = openedWorkspaces.find((w) => w.path === fromProfile.path);
-      if (known) return known;
-      // 未在 opened 列表（未打开但被聚焦）也接受路径事实
-      return { ...fromProfile, branch: null, id: '' };
-    }
-    // ② 回退：agent 事件桥（terminalId → workspaceId）
-    const ctx = await orca.host.call('workspace.readContext').catch(() => null);
-    if (ctx) {
-      const ids = new Set();
-      for (const t of ctx.terminals || []) {
-        const known = terminalWorkspace.get(t.id);
-        if (known) ids.add(known);
-      }
-      if (ids.size === 1) {
-        const hit = matchWorkspaceId([...ids][0]);
-        if (hit) return hit;
-      }
-      // ③ 回退：branch（去 refs/heads/ 前缀）+ displayName 唯一命中
-      const byCtx = focusedFromHostContext(ctx, openedWorkspaces);
-      if (byCtx) return byCtx;
-    }
-    // ④ 回退：仅打开了唯一一个工作区时直接采用，避免新工作区冷启动无焦点
-    if (openedWorkspaces.length === 1 && openedWorkspaces[0]?.path) {
-      return openedWorkspaces[0];
-    }
-    orca.log(`Workspace unresolved: opened=${openedWorkspaces.length}`);
-    return null;
-  }
-
-  async function focusedFromWorktreePs() {
-    const r = await orcaTab(['worktree', 'ps', '--json'], 3000);
-    if (r.err) return null;
-    const worktrees = orcaResult(parseOrcaJson(r.stdout))?.worktrees || [];
-    const active = worktrees.find((w) => w?.isActive === true && w.path);
-    if (active) return { path: active.path, name: active.displayName || path.basename(active.path) || '' };
-    const ranked = worktrees
-      .filter((w) => w?.path && Number.isFinite(Number(w.lastActivityAt)))
-      .sort((a, b) => Number(b.lastActivityAt) - Number(a.lastActivityAt));
-    return ranked[0] ? { path: ranked[0].path, name: ranked[0].displayName || path.basename(ranked[0].path) || '' } : null;
-  }
-  async function resolveLiveFocusedWorkspace() {
-    await refreshWorkspaces();
-    const ctx = await orca.host.call('workspace.readContext').catch(() => null);
-    const fromHost = focusedFromHostContext(ctx, openedWorkspaces);
-    if (fromHost?.path) return fromHost;
-    const fromPs = await focusedFromWorktreePs();
-    if (fromPs?.path) return fromPs;
-    return resolveFocusedWorkspace();
-  }
-
-  const focusedAtStart = await resolveFocusedWorkspace();
-  workspaceRoot = focusedAtStart?.path ?? '';
-  workspaceName = focusedAtStart?.name ?? '';
-  writeState();
+  const startFocus = await resolveWorkspace({ live: false });
+  workspaceRoot = startFocus.ok ? startFocus.workspaceRoot : '';
+  workspaceName = startFocus.ok ? startFocus.workspaceName : '';
+  writeState(workspaceRoot, workspaceName, startFocus.ok ? null : startFocus);
   orca.log(`Focused workspace: ${workspaceName || '(unresolved)'} ${workspaceRoot}`);
 
-  // Keep focus and the opened-workspace set in sync
   let workspaceGeneration = 0;
   let reresolveTimer = null;
   function scheduleReresolve() {
@@ -281,23 +242,23 @@ function isInstalledPluginPath(target) {
     reresolveTimer = setTimeout(async () => {
       reresolveTimer = null;
       const generation = ++workspaceGeneration;
-      const hit = await resolveFocusedWorkspace();
+      const hit = await resolveWorkspace({ live: false });
       if (generation !== workspaceGeneration) return;
-      const nextRoot = hit?.path ?? '';
-      if (nextRoot !== workspaceRoot) {
-        invalidateGalleryTabCache();
+      const nextRoot = hit.ok ? hit.workspaceRoot : '';
+      if (nextRoot !== workspaceRoot || !hit.ok) {
+        if (nextRoot !== workspaceRoot) invalidateGalleryTabCache();
         workspaceRoot = nextRoot;
-        workspaceName = hit?.name ?? '';
-        writeState();
+        workspaceName = hit.ok ? hit.workspaceName : '';
+        writeState(workspaceRoot, workspaceName, hit.ok ? null : hit);
         orca.log(`Focused workspace: ${workspaceName || '(unresolved)'} ${workspaceRoot}`);
       }
     }, 800);
+    reresolveTimer.unref?.();
   }
 
   if (orca.events?.on) {
     orca.events.on('agent.status.changed', (e) => {
       rememberAgentEvent(e);
-      // 新到的 agent 事件可能让先前未识别的焦点变得可识别
       if (!workspaceRoot) scheduleReresolve();
     });
     orca.events.on('workspace.changed', async () => {
@@ -305,11 +266,11 @@ function isInstalledPluginPath(target) {
       invalidateGalleryTabCache();
       workspaceRoot = '';
       workspaceName = '';
-      const hit = await resolveFocusedWorkspace();
+      const hit = await resolveWorkspace({ live: false });
       if (generation !== workspaceGeneration) return;
-      workspaceRoot = hit?.path ?? '';
-      workspaceName = hit?.name ?? '';
-      writeState();
+      workspaceRoot = hit.ok ? hit.workspaceRoot : '';
+      workspaceName = hit.ok ? hit.workspaceName : '';
+      writeState(workspaceRoot, workspaceName, hit.ok ? null : hit);
       orca.log(`Focused workspace: ${workspaceName || '(unresolved)'} ${workspaceRoot}`);
     });
   }
@@ -320,7 +281,7 @@ function isInstalledPluginPath(target) {
     const bySkill = {};
     for (const id of Object.keys(ROOT_MARKERS)) bySkill[id] = [];
     if (!rootDir) return bySkill;
-    const SKIP = new Set(['.git', 'node_modules', '.orca', 'vendor', 'dist', '.venv', '__pycache__', 'build']);
+    const SKIP = new Set(['.git', 'node_modules', '.orca', '.agy-daddy', '.agents', 'trash', 'vendor', 'dist', '.venv', '__pycache__', 'build']);
     (function walk(dir, depth) {
       if (depth > 2) return;
       let entries;
@@ -351,7 +312,7 @@ function isInstalledPluginPath(target) {
     return bySkill;
   }
 
-  async function openSkillEditor(skillId, rootInput, wsPath) {
+  async function openSkillEditor(skillId, rootInput, wsPath, { skipTabCreate = false } = {}) {
     const meta = SKILL_META.find((s) => s.id === skillId);
     if (!meta) return { ok: false, error: `unknown skill: ${skillId}` };
     const cli = artifactCli(skillId);
@@ -370,18 +331,22 @@ function isInstalledPluginPath(target) {
     if (r.err) return { ok: false, error: `artifact open failed: ${r.stderr || r.err.message}` };
     const m = r.stdout.match(/\{[\s\S]*"url"[\s\S]*\}/);
     if (!m) return { ok: false, error: `no url in artifact output: ${r.stdout.slice(0, 200)}` };
-    let url;
+    let parsed;
     try {
-      url = JSON.parse(m[0]).url;
+      parsed = JSON.parse(m[0]);
     } catch {
       return { ok: false, error: `unparsable artifact output: ${r.stdout.slice(0, 200)}` };
     }
+    const url = parsed.url;
     openEditors.set(root, { skill: skillId, url });
     orca.log(`Skill editor up: ${skillId} -> ${url}`);
 
-    const created = await orcaTabCreate(url, workspaceRoot || undefined, { split: true });
+    if (skipTabCreate) {
+      return { ok: true, url, root, reused: parsed.reused === true };
+    }
+    const created = await orcaTabCreate(url, wsPath || workspaceRoot || undefined, { split: true });
     if (created.error) orca.log(`Browser tab create failed: ${created.error}`);
-    return { ok: true, url, ...(created.error ? { tabError: created.error } : {}) };
+    return { ok: true, url, root, ...(created.error ? { tabError: created.error } : {}) };
   }
 
   async function stopSkillEditor(skillId, root) {
@@ -404,52 +369,53 @@ function isInstalledPluginPath(target) {
       return { ok: false, error: `${skillId} 项目由 agent 创建（本类型无静态示例模板）` };
     }
     const targetSkill = tpl.skill || skillId;
-    // 设计系统按项目全局唯一：一个工作区只允许一套统一规范
-    if (targetSkill === 'claude-design-system') {
-      const existing = scanDesignProjects(workspaceRoot || wsPath)['claude-design-system'] || [];
-      if (existing.length > 0) {
-        return { ok: false, error: '当前工作区已有设计系统（全项目统一参考）；如需更换请先删除' };
-      }
-    }
     let base = wsPath || workspaceRoot;
-    if (!base) {
-      // worker 刚启动 / agent 事件未到的过渡窗口：主动重解析一次，
-      // 而不是直接把“未识别”抛给用户。
-      const hit = await resolveFocusedWorkspace();
-      base = hit?.path ?? '';
-      if (base) {
-        workspaceRoot = base;
-        workspaceName = hit.name;
-        writeState();
+    let wsCheck = base ? validateWorkspacePath(base, validateOpts) : null;
+    if (!wsCheck || !wsCheck.ok) {
+      const hit = await resolveWorkspace({ live: false });
+      if (!hit.ok) {
+        return { ok: false, code: hit.code, error: hit.message };
+      }
+      workspaceRoot = hit.workspaceRoot;
+      workspaceName = hit.workspaceName;
+      writeState(workspaceRoot, workspaceName);
+      base = hit.workspaceRoot;
+    } else {
+      base = wsCheck.workspaceRoot;
+    }
+    if (targetSkill === 'claude-design-system') {
+      const existing = scanDesignProjects(base)['claude-design-system'] || [];
+      if (existing.length > 0) {
+        return {
+          ok: false,
+          code: 'DESIGN_SYSTEM_EXISTS',
+          root: existing[0].root,
+          error: formatWorkspaceError('DESIGN_SYSTEM_EXISTS', { title: existing[0].title }),
+        };
       }
     }
-    if (!base) return { ok: false, error: '当前工作区未识别：请让本工作区的 agent 产生一次状态事件，或稍后重试' };
-    // 远程/未挂载工作区护栏：路径在本机不可见时，服务扫不到、mkdirSync 还可能
-    // 在本机创建影子目录（写错盘）。明确拒绝而不是静默落到本机根路径。
-    if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
-      return { ok: false, error: `工作区路径在本机不可见（远程工作区或未挂载）：${base}。项目库目前仅支持本机工作区` };
-    }
-    if (isInstalledPluginPath(base)) {
-      return { ok: false, error: '当前工作区是 Orca 插件安装路径，请切换到其他工作区创建设计项目' };
-    }
-    const safe = String(nameInput || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
-    const baseName = safe || tpl.dirName;
+    const displayTitle = cleanTitle(nameInput) || tpl.title || '';
+    const baseName = sanitizeDirSlug(nameInput) || tpl.dirName;
     const designDir = path.join(base, '.design');
-    // 允许多次创建：同名时自动追加 -2 / -3 …，不覆盖已有项目
     let name = baseName;
     let i = 2;
     while (fs.existsSync(path.join(designDir, name))) {
       name = `${baseName}-${i++}`;
     }
     const root = path.join(designDir, name);
+    const finalTitle = displayTitle || name;
     const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
     try {
       for (const [rel, content] of Object.entries(tpl.files)) {
         const p = path.join(root, rel);
         fs.mkdirSync(path.dirname(p), { recursive: true });
         if (content === '__INDEX__') {
-          const idx = { ...EXAMPLE_INDEX[skillId], createdOnFiles: { v: 1, at: now }, title: safe ? name : (tpl.title || name),
-            lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Example scaffold' } };
+          const idx = {
+            ...EXAMPLE_INDEX[skillId],
+            createdOnFiles: { v: 1, at: now },
+            title: finalTitle,
+            lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Example scaffold' },
+          };
           fs.writeFileSync(p, JSON.stringify(idx, null, 2));
         } else {
           fs.writeFileSync(p, typeof content === 'function' ? content(now) : content);
@@ -462,7 +428,7 @@ function isInstalledPluginPath(target) {
     let problems = null;
     try { problems = JSON.parse(r.stdout).problems ?? null; } catch { /* keep null */ }
     orca.log(`Example created: ${root} (problems=${problems})`);
-    return { ok: true, root, problems };
+    return { ok: true, root, title: finalTitle, problems };
   }
 
   // 限定在 <工作区>/.design/<单层目录>：禁止 ../ 穿越与插件树内操作
@@ -525,23 +491,69 @@ function isInstalledPluginPath(target) {
     return { ok: true };
   }
 
-  // ---- 项目库：独立 detached 服务（固定 3480），worker 被回收也不影响库页 ----
-  const GALLERY_PORT = 3480;
-  const GALLERY_URL = `http://127.0.0.1:${GALLERY_PORT}/`;
-  const GALLERY_SCRIPT = path.join(pluginRoot, 'src', 'gallery-server.mjs');
-
-  async function checkGalleryStatus() {
+  // ---- 项目库：独立 detached 服务（默认 3480），worker 被回收也不影响库页 ----
+  async function probeGalleryHealth(port = GALLERY_PORT, timeoutMs = 500) {
+    const baseUrl = `http://127.0.0.1:${port}/`;
     try {
-      const r = await fetch(`${GALLERY_URL}api/list`, { signal: AbortSignal.timeout(1200) });
-      if (!r.ok) return { alive: false, match: false };
-      const data = await r.json().catch(() => null);
-      return { alive: true, match: Boolean(data && data.buildId === EXPECTED_BUILD_ID) };
+      const r = await fetch(`${baseUrl}api/health`, { signal: AbortSignal.timeout(timeoutMs) });
+      const text = await r.text();
+      let data = null;
+      try { data = JSON.parse(text); } catch {}
+      if (r.status === 200 && data?.app === APP_ID) {
+        return {
+          alive: true,
+          mine: true,
+          match: data.buildId === EXPECTED_BUILD_ID,
+          buildId: data.buildId || '',
+          pid: Number(data.pid) || null,
+        };
+      }
+      // 兼容旧版 v0.2.1 升级热替换：/api/health 404 '{}' 时补探一次 /api/list
+      if (r.status === 404 && text.trim() === '{}') {
+        try {
+          const lr = await fetch(`${baseUrl}api/list`, { signal: AbortSignal.timeout(200) });
+          const ld = await lr.json().catch(() => null);
+          if (
+            lr.status === 200
+            && ld?.ok === true
+            && !ld.app
+            && Array.isArray(ld.artifacts)
+            && (typeof ld.buildId === 'string' || ('workspaceRoot' in ld && 'workspaceName' in ld))
+          ) {
+            return { alive: true, mine: true, match: false, legacy: true, pid: null };
+          }
+        } catch {}
+      }
+      return { alive: true, mine: false };
     } catch {
-      return { alive: false, match: false };
+      return { alive: false, mine: false };
     }
   }
 
-  async function stopLegacyGalleryServer() {
+  function isPidAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 1) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function killSpawnedChild(child) {
+    const pid = child?.pid;
+    if (!Number.isInteger(pid) || pid <= 1) return;
+    try { process.kill(-pid, 'SIGTERM'); } catch {}
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+    if (isPidAlive(pid)) {
+      try { process.kill(-pid, 'SIGKILL'); } catch {}
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+  }
+
+  async function stopLegacyGalleryServer(health) {
+    if (!health?.mine || health.match) return false;
     try {
       await fetch(`${GALLERY_URL}api/shutdown`, {
         method: 'POST',
@@ -550,83 +562,140 @@ function isInstalledPluginPath(target) {
         signal: AbortSignal.timeout(800),
       });
     } catch {}
-    if (process.platform !== 'win32') {
-      try {
-        const pids = execFileSync('lsof', [`-tiTCP:${GALLERY_PORT}`, '-sTCP:LISTEN'], {
-          timeout: 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-        }).trim().split(/\s+/).filter(Boolean);
-        for (const rawPid of pids) {
-          const pid = Number(rawPid);
-          if (!Number.isInteger(pid) || pid <= 1) continue;
-          const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
-            timeout: 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-          });
-          if (cmd.includes('gallery-server.mjs')) {
-            try { process.kill(pid, 'SIGTERM'); } catch {}
-          }
-        }
-      } catch {}
-    }
-    for (let i = 0; i < 8; i++) {
-      const st = await checkGalleryStatus();
+    const deadline = Date.now() + 1200;
+    while (Date.now() < deadline) {
+      const st = await probeGalleryHealth(GALLERY_PORT, 200);
       if (!st.alive) return true;
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    if (Number.isInteger(health.pid) && health.pid > 1) {
+      try { process.kill(health.pid, 'SIGTERM'); } catch {}
+      await new Promise((r) => setTimeout(r, 150));
+      const st = await probeGalleryHealth(GALLERY_PORT, 200);
+      return !st.alive;
     }
     return false;
   }
 
-  function spawnGalleryProcess() {
-    const childEnv = {
-      ...process.env,
-      ORCA_CLI_COMMAND: ORCA_BIN,
-      ORCA_USER_DATA: HOST_USER_DATA,
-      ORCA_PROFILE_DB: PROFILE_DB,
-      ORCA_STATE_FILE: STATE_FILE,
-    };
-    const child = execFile(process.execPath, [GALLERY_SCRIPT], {
-      detached: true,
-      stdio: 'ignore',
-      env: childEnv,
-    }, (err) => {
-      if (err) orca.log(`gallery spawn error: ${err.message}`);
-    });
-    child.unref();
-  }
-
-  // 服务探测快速健康检查（1200ms）：未启动则后台拉起；若 3480 被旧版插件常驻服务占据则自动热替换。
   let gallerySpawnInFlight = null;
-  async function ensureGallery() {
-    const status = await checkGalleryStatus();
-    if (status.alive && status.match) return true;
+  async function ensureGalleryRunning({ timeoutMs = STARTUP_TIMEOUT_MS } = {}) {
+    const health = await probeGalleryHealth(GALLERY_PORT, Math.min(500, timeoutMs));
+    if (health.alive && health.mine && health.match) {
+      return { ok: true, warm: true, port: GALLERY_PORT, buildId: health.buildId };
+    }
+    if (health.alive && !health.mine) {
+      return {
+        ok: false,
+        code: 'PORT_OCCUPIED_BY_OTHER',
+        port: GALLERY_PORT,
+        error: formatWorkspaceError('PORT_OCCUPIED_BY_OTHER', { port: GALLERY_PORT }),
+      };
+    }
     if (GALLERY_SCRIPT === '/dev/null') {
-      spawnGalleryProcess();
-      return false;
+      return { ok: true, warm: false, stub: true, port: GALLERY_PORT };
     }
     if (!gallerySpawnInFlight) {
       gallerySpawnInFlight = (async () => {
-        if (status.alive && !status.match) {
+        const deadline = Date.now() + timeoutMs;
+        if (health.alive && health.mine && !health.match) {
           orca.log(`Replacing stale gallery server on port ${GALLERY_PORT} with build ${EXPECTED_BUILD_ID}`);
-          await stopLegacyGalleryServer();
+          await stopLegacyGalleryServer(health);
         }
-        spawnGalleryProcess();
+        const childEnv = {
+          ...process.env,
+          PORT: String(GALLERY_PORT),
+          ORCA_GALLERY_PORT: String(GALLERY_PORT),
+          ORCA_GALLERY_APP_ID: APP_ID,
+          ORCA_CLI_COMMAND: ORCA_BIN,
+          ORCA_USER_DATA: HOST_USER_DATA,
+          ORCA_DESIGN_HOME: DESIGN_HOME,
+          ORCA_PROFILE_DB: PROFILE_DB,
+          ORCA_STATE_FILE: STATE_FILE,
+        };
+        let stderrBuf = '';
+        let exited = false;
+        const child = spawn(process.execPath, [GALLERY_SCRIPT], {
+          detached: true,
+          stdio: ['ignore', 'ignore', 'pipe'],
+          env: childEnv,
+        });
+        const onData = (chunk) => {
+          if (stderrBuf.length < 2048) stderrBuf += String(chunk);
+        };
+        const onExit = () => { exited = true; };
+        child.stderr?.on('data', onData);
+        child.once('exit', onExit);
+        child.once('error', onExit);
+
+        const cleanupChildListeners = () => {
+          child.stderr?.off('data', onData);
+          child.off('exit', onExit);
+          child.off('error', onExit);
+          try { child.stderr?.destroy(); } catch {}
+        };
+
+        while (Date.now() < deadline) {
+          if (exited && /EADDRINUSE/i.test(stderrBuf)) {
+            cleanupChildListeners();
+            return {
+              ok: false,
+              code: 'PORT_OCCUPIED_BY_OTHER',
+              port: GALLERY_PORT,
+              error: formatWorkspaceError('PORT_OCCUPIED_BY_OTHER', { port: GALLERY_PORT }),
+            };
+          }
+          const h = await probeGalleryHealth(GALLERY_PORT, 300);
+          if (h.alive && h.mine && h.match) {
+            cleanupChildListeners();
+            child.unref();
+            return { ok: true, warm: false, port: GALLERY_PORT, buildId: h.buildId };
+          }
+          if (h.alive && !h.mine) {
+            cleanupChildListeners();
+            await killSpawnedChild(child);
+            return {
+              ok: false,
+              code: 'PORT_OCCUPIED_BY_OTHER',
+              port: GALLERY_PORT,
+              error: formatWorkspaceError('PORT_OCCUPIED_BY_OTHER', { port: GALLERY_PORT }),
+            };
+          }
+          if (exited) break;
+          await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+        }
+
+        cleanupChildListeners();
+        await killSpawnedChild(child);
+        if (/EADDRINUSE/i.test(stderrBuf)) {
+          return {
+            ok: false,
+            code: 'PORT_OCCUPIED_BY_OTHER',
+            port: GALLERY_PORT,
+            error: formatWorkspaceError('PORT_OCCUPIED_BY_OTHER', { port: GALLERY_PORT }),
+          };
+        }
+        return {
+          ok: false,
+          code: 'START_TIMEOUT',
+          port: GALLERY_PORT,
+          error: formatWorkspaceError('START_TIMEOUT', { port: GALLERY_PORT }),
+        };
       })().finally(() => { gallerySpawnInFlight = null; });
     }
-    return false;
+    return gallerySpawnInFlight;
   }
 
-  // 连点保护：同一次打开的 2 秒内重复点击直接返回，且命令串行执行
   let galleryOpenInFlight = null;
   let lastGalleryOpenAt = 0;
-  // 即时反馈：点击后状态栏条目立刻变「打开中」，完成/失败后恢复。
-  // statusBar.update 自 Orca 1.4.248 提供（plugin-private，无需 capability）；失败静默忽略。
-  // tab 快路径：缓存只服务“同工作区、URL 匹配、已验证为当前 Tab”的 page id。
-  // 切工作区、缓存刷新跨过工作区切换、switch/current 失败都不得产生 ok:true 假成功。
   let tabCacheTimer = null;
+
+  function isGalleryTabUrl(rawUrl) {
+    return String(rawUrl || '').startsWith(GALLERY_URL);
+  }
   function worktreeScopeArgs(openRoot) {
     return openRoot ? ['--worktree', `path:${openRoot}`] : [];
   }
   function tabListArgs(openRoot) {
-    // 显式 --worktree：list/switch/current/create 都锚定本次点击的实时焦点工作区。
     return ['tab', 'list', '--json', ...worktreeScopeArgs(openRoot)];
   }
   function tabCurrentArgs(openRoot) {
@@ -635,34 +704,35 @@ function isInstalledPluginPath(target) {
   function worktreeActivateArgs(openRoot) {
     return ['worktree', 'activate', ...worktreeScopeArgs(openRoot), '--json'];
   }
-  async function refreshTabCache(openRoot) {
-    // 记录请求时的工作区：异步 list 返回时若焦点已切走，丢弃结果，避免写入旧 id。
+  async function findExistingGalleryTab(openRoot) {
     const requestedWsRoot = openRoot || '';
     if (cachedPageWsRoot !== requestedWsRoot) {
       cachedGalleryPageId = null;
       cachedPageWsRoot = requestedWsRoot;
     }
     const r = await orcaTab(tabListArgs(openRoot));
-    if (r.err || cachedPageWsRoot !== requestedWsRoot) return;
+    if (r.err || cachedPageWsRoot !== requestedWsRoot) return null;
     const tabs = orcaResult(parseOrcaJson(r.stdout))?.tabs || [];
-    const hit = tabs.find((t) => String(t.url || '').startsWith(GALLERY_URL));
-    cachedGalleryPageId = hit ? hit.browserPageId || null : null;
+    const hit = tabs.find((t) => isGalleryTabUrl(t.url));
+    cachedGalleryPageId = hit ? (hit.browserPageId || null) : null;
+    return hit || null;
   }
   function startTabCacheLoop() {
     if (tabCacheTimer) return;
     tabCacheTimer = setInterval(() => {
-      resolveLiveFocusedWorkspace()
+      resolveWorkspace({ live: true })
         .then((hit) => {
-          if (hit?.path) writeState(hit.path, hit.name || hit.displayName || '');
-          return refreshTabCache(hit?.path || '');
+          if (hit.ok) {
+            writeState(hit.workspaceRoot, hit.workspaceName);
+            return findExistingGalleryTab(hit.workspaceRoot);
+          }
+          return null;
         })
         .catch(() => {});
     }, 30000);
     tabCacheTimer.unref?.();
   }
-  // switch 会改变 scoped worktree 的 active tab；--focus 负责把 browser pane 提到前台。
-  // 这里只使用 openRoot 快照：用户切走工作区后，后续异步步骤不得把宿主拉回旧工作区。
-  async function revealGalleryTab(pageId, label, lap, openRoot) {
+  async function revealGalleryTab(pageId, label, lap, openRoot, { cacheGallery = true } = {}) {
     const activated = openRoot ? await orcaTab(worktreeActivateArgs(openRoot), 8000) : null;
     if (activated?.err) {
       orca.log(`gallery worktree-activate failed: ${activated.err.message || activated.err}`);
@@ -685,12 +755,14 @@ function isInstalledPluginPath(target) {
       orca.log(`gallery tab not current after ${label}: expected ${switchedId}, got ${currentId || '(none)'}`);
       return null;
     }
-    cachedGalleryPageId = currentId;
-    cachedPageWsRoot = openRoot || '';
+    if (cacheGallery) {
+      cachedGalleryPageId = currentId;
+      cachedPageWsRoot = openRoot || '';
+    }
     return currentId;
   }
-  async function createAndRevealGalleryTab(lap, openRoot) {
-    const created = await orcaTabCreate(GALLERY_URL, openRoot || undefined);
+  async function createAndRevealGalleryTab(lap, openRoot, targetUrl = GALLERY_URL) {
+    const created = await orcaTabCreate(targetUrl, openRoot || undefined);
     lap('tab-create');
     if (created.error) {
       orca.log(`gallery tab-create failed: ${created.error}`);
@@ -698,12 +770,12 @@ function isInstalledPluginPath(target) {
     }
     const pageId = await revealGalleryTab(created.pageId, 'tab-switch(created)', lap, openRoot);
     if (!pageId) {
-      // 新 Tab 已创建，但无法证明它是当前 Tab；报告失败，让调用方能重试而不是静默假成功。
       return { ok: false, error: 'gallery tab created but visibility verification failed' };
     }
     lastGalleryOpenAt = Date.now();
     return { ok: true, reused: false, pageId, workspaceRoot: openRoot };
   }
+
   const SB_IDLE = { id: 'gallery', text: 'Design', icon: 'layers', tone: 'accent' };
   function sbUpdate(patch) {
     try {
@@ -716,67 +788,100 @@ function isInstalledPluginPath(target) {
       ? { id: 'gallery', text: '⟳ 打开中…', tone: 'accent', tooltip: 'Lakala-Design-Plugin · 正在打开项目库' }
       : { ...SB_IDLE, tooltip: 'Lakala-Design-Plugin · 打开设计项目库' });
   }
+
   async function openGalleryTab() {
     if (galleryOpenInFlight) return galleryOpenInFlight;
-    // 节流只在“上次成功打开”后 2 秒内生效：失败后的立即重试不被吞掉
-    if (Date.now() - lastGalleryOpenAt < 2000) return { ok: true, reused: true, throttled: true };
+    if (Date.now() - lastGalleryOpenAt < SUCCESS_THROTTLE_MS) {
+      return { ok: true, reused: true, throttled: true };
+    }
     const T0 = Date.now();
     const lap = (name) => orca.log(`gallery-open ${name} +${Date.now() - T0}ms`);
+    // <=16ms 同步触发状态栏反馈
     galleryLoading(true);
     galleryOpenInFlight = (async () => {
       try {
         lap('start');
-        // 点击时解析实时焦点并快照：整次 list/switch/create/current 都用同一个 root，
-        // 不再读取可能在 await 之间被 workspace.changed 改写的全局 workspaceRoot。
-        const live = await resolveLiveFocusedWorkspace();
-        const openRoot = live?.path || '';
-        const openName = live?.name || live?.displayName || workspaceName;
+        const [initialHealth, wsRes] = await Promise.all([
+          GALLERY_SCRIPT === '/dev/null'
+            ? Promise.resolve({ alive: false, mine: true })
+            : probeGalleryHealth(GALLERY_PORT, 350),
+          resolveWorkspace({ live: true }),
+        ]);
         lap('focus');
-        if (!openRoot) return { ok: false, error: '当前工作区未识别' };
-        if (!fs.existsSync(openRoot) || !fs.statSync(openRoot).isDirectory()) {
-          orca.log(`gallery blocked: workspace not visible locally: ${openRoot}`);
-          return { ok: false, error: `远程/本机不可见的工作区暂不支持项目库（仅支持本机工作区）：${openRoot}` };
+        if (!wsRes.ok) {
+          workspaceRoot = '';
+          workspaceName = '';
+          writeState('', '', wsRes);
+          invalidateGalleryTabCache();
+          return { ok: false, code: wsRes.code || wsRes.reason, error: wsRes.message };
         }
+        const openRoot = wsRes.workspaceRoot;
+        const openName = wsRes.workspaceName;
         workspaceRoot = openRoot;
-        workspaceName = openName || workspaceName;
-        writeState(openRoot, workspaceName);
+        workspaceName = openName;
+        writeState(openRoot, openName);
         if (cachedPageWsRoot !== openRoot) invalidateGalleryTabCache();
         cachedPageWsRoot = openRoot;
 
-        // 服务探测/spawn 不阻塞“切换/新建 tab”；缓存刷新串行完成后才走快路径。
-        ensureGallery().catch((e) => orca.log(`gallery ensure: ${e.message}`)); // 后台拉起服务
-        await refreshTabCache(openRoot).catch(() => {});
-        lap('tab-cache');
+        if (initialHealth.alive && !initialHealth.mine) {
+          return {
+            ok: false,
+            code: 'PORT_OCCUPIED_BY_OTHER',
+            port: GALLERY_PORT,
+            error: formatWorkspaceError('PORT_OCCUPIED_BY_OTHER', { port: GALLERY_PORT }),
+          };
+        }
 
-        // 快路径①：缓存里已知同工作区库页 tab → switch + current 校验。
-        if (cachedGalleryPageId) {
-          const pageId = await revealGalleryTab(cachedGalleryPageId, 'tab-switch(cached)', lap, openRoot);
+        const isWarm = initialHealth.alive && initialHealth.mine && initialHealth.match;
+        if (isWarm) {
+          // 热开快路径①：命中缓存直接 switch + current 校验（0 次 tab list）
+          if (cachedGalleryPageId) {
+            const pageId = await revealGalleryTab(cachedGalleryPageId, 'tab-switch(cached)', lap, openRoot);
+            if (pageId) {
+              lastGalleryOpenAt = Date.now();
+              return { ok: true, reused: true, pageId, workspaceRoot: openRoot };
+            }
+            cachedGalleryPageId = null;
+          }
+          // 热开快路径②：唯一 1 次 tab list
+          const hit = await findExistingGalleryTab(openRoot);
+          lap('tab-list');
+          if (hit) {
+            const pageId = await revealGalleryTab(hit.browserPageId, 'tab-switch', lap, openRoot);
+            if (pageId) {
+              lastGalleryOpenAt = Date.now();
+              return { ok: true, reused: true, pageId, workspaceRoot: openRoot };
+            }
+          }
+          return await createAndRevealGalleryTab(lap, openRoot, GALLERY_URL);
+        }
+
+        // 冷开/热替换并发路径：ensureGalleryRunning 与至多 1 次 tab list 并发推进，共享 8.0s 硬超时预算
+        const remainingMs = Math.max(100, STARTUP_TIMEOUT_MS - (Date.now() - T0));
+        const usedCachedId = cachedGalleryPageId;
+        const [srvRes, listedTab] = await Promise.all([
+          ensureGalleryRunning({ timeoutMs: remainingMs }),
+          usedCachedId ? Promise.resolve(null) : findExistingGalleryTab(openRoot),
+        ]);
+        lap('cold-ready');
+        if (!srvRes.ok) return srvRes;
+
+        if (usedCachedId) {
+          const pageId = await revealGalleryTab(usedCachedId, 'tab-switch(cached)', lap, openRoot);
           if (pageId) {
             lastGalleryOpenAt = Date.now();
             return { ok: true, reused: true, pageId, workspaceRoot: openRoot };
           }
-          cachedGalleryPageId = null; // 缓存失效，继续现场 list / create
-        }
-        // 快路径②：现场 list（超时 3s），找到库页 tab 就验证可见性；失败原因落日志
-        try {
-          const listed = await orcaTab(tabListArgs(openRoot));
-          lap('tab-list');
-          if (listed.err) {
-            orca.log(`gallery tab-list failed: ${listed.err.message || listed.err}${listed.stderr ? ` :: ${listed.stderr.slice(0, 160)}` : ''}`);
-          } else {
-            const tabs = orcaResult(parseOrcaJson(listed.stdout))?.tabs || [];
-            const hit = tabs.find((t) => String(t.url || '').startsWith(GALLERY_URL));
-            if (hit) {
-              const pageId = await revealGalleryTab(hit.browserPageId, 'tab-switch', lap, openRoot);
-              if (pageId) {
-                lastGalleryOpenAt = Date.now();
-                return { ok: true, reused: true, pageId, workspaceRoot: openRoot };
-              }
-            }
+          cachedGalleryPageId = null;
+        } else if (listedTab) {
+          const pageId = await revealGalleryTab(listedTab.browserPageId, 'tab-switch', lap, openRoot);
+          if (pageId) {
+            lastGalleryOpenAt = Date.now();
+            return { ok: true, reused: true, pageId, workspaceRoot: openRoot };
           }
-        } catch { /* fall through to create */ }
-        // 最后一步：新建 tab，解析 page id → switch → current 校验；失败原因落日志供定位
-        return await createAndRevealGalleryTab(lap, openRoot);
+        }
+        const targetUrl = srvRes.stub ? GALLERY_URL : `${GALLERY_URL}#opening`;
+        return await createAndRevealGalleryTab(lap, openRoot, targetUrl);
       } finally {
         galleryOpenInFlight = null;
         galleryLoading(false);
@@ -798,12 +903,104 @@ function isInstalledPluginPath(target) {
     });
 
     handle('studio.gallery.open', async () => openGalleryTab());
+    handle('studio.gallery.openTab', async () => openGalleryTab());
+
+    // LKL-PMStudio 左侧边栏 PluginPageHost 桥接：绕过 guest 死端代理与 CSP 限制
+    const BRIDGE_API_RE = /^\/api\/(?:health|list|open|create|create-example|update|delete|restore|forget|forget-missing|rename|stop|restart-editor|start)(?:\?.*)?$/;
+    handle('studio.gallery.api', async (input) => {
+      const route = String(input?.route || '');
+      if (!BRIDGE_API_RE.test(route)) {
+        return { ok: false, code: 'INVALID_ROUTE', error: `Unsupported gallery API route: ${route}` };
+      }
+      const method = input?.method === 'POST' ? 'POST' : 'GET';
+      const wsRes = await resolveWorkspace({ live: true });
+      if (wsRes.ok) {
+        workspaceRoot = wsRes.workspaceRoot;
+        workspaceName = wsRes.workspaceName;
+        writeState(workspaceRoot, workspaceName);
+      } else {
+        workspaceRoot = '';
+        workspaceName = '';
+        writeState('', '', wsRes);
+      }
+      const srv = await ensureGalleryRunning({ timeoutMs: STARTUP_TIMEOUT_MS });
+      if (!srv.ok) return srv;
+      const payload = method === 'POST' ? JSON.stringify(input?.body && typeof input.body === 'object' ? input.body : {}) : '';
+      return new Promise((resolve) => {
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port: srv.port || GALLERY_PORT,
+          path: route,
+          method,
+          headers: {
+            host: `127.0.0.1:${srv.port || GALLERY_PORT}`,
+            origin: `http://127.0.0.1:${srv.port || GALLERY_PORT}`,
+            'x-orca-design-client': '1',
+            ...(method === 'POST'
+              ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+              : {}),
+          },
+          timeout: 15000,
+        }, (res) => {
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf8');
+            try { resolve(JSON.parse(text)); }
+            catch { resolve({ ok: false, error: text.slice(0, 200) || `HTTP ${res.statusCode}` }); }
+          });
+        });
+        req.on('error', (err) => resolve({ ok: false, error: err.message }));
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ ok: false, code: 'START_TIMEOUT', error: formatWorkspaceError('START_TIMEOUT', { port: GALLERY_PORT }) });
+        });
+        if (method === 'POST') req.write(payload);
+        req.end();
+      });
+    });
+
+    handle('studio.gallery.thumb', async (input) => {
+      const root = typeof input?.root === 'string' ? input.root : '';
+      if (!root || root.includes('\0') || !path.isAbsolute(root)) {
+        return { ok: false, code: 'THUMB_NOT_FOUND' };
+      }
+      const hash = crypto.createHash('sha256').update(root).digest('hex').slice(0, 24);
+      const tp = path.join(DESIGN_HOME, 'thumbs', `${hash}.png`);
+      try {
+        const stat = fs.statSync(tp);
+        if (!stat.isFile() || stat.size > 5 * 1024 * 1024) {
+          return { ok: false, code: 'THUMB_NOT_FOUND' };
+        }
+        return { ok: true, dataUrl: `data:image/png;base64,${fs.readFileSync(tp).toString('base64')}` };
+      } catch {
+        return { ok: false, code: 'THUMB_NOT_FOUND' };
+      }
+    });
+
+    handle('studio.editor.open', async (input) => {
+      const wsRes = await resolveWorkspace({ live: true });
+      const openRoot = wsRes.ok ? wsRes.workspaceRoot : workspaceRoot;
+      const res = await openSkillEditor(input?.skill, input?.root, openRoot, { skipTabCreate: true });
+      if (!res.ok) return res;
+      const listed = await orcaTab(tabListArgs(openRoot));
+      const tabs = !listed.err ? (orcaResult(parseOrcaJson(listed.stdout))?.tabs || []) : [];
+      const existing = tabs.find((t) => String(t.url || '') === res.url);
+      if (existing?.browserPageId) {
+        const pageId = await revealGalleryTab(existing.browserPageId, 'editor-switch', () => {}, openRoot, { cacheGallery: false });
+        return { ok: true, url: res.url, pageId: pageId || existing.browserPageId, reused: true, mode: 'workspace-tab' };
+      }
+      const created = await orcaTabCreate(res.url, openRoot || undefined);
+      if (created.error || !created.pageId) {
+        return { ok: false, error: created.error || 'failed to create editor tab' };
+      }
+      const pageId = await revealGalleryTab(created.pageId, 'editor-switch(created)', () => {}, openRoot, { cacheGallery: false });
+      return { ok: true, url: res.url, pageId: pageId || created.pageId, reused: false, mode: 'workspace-tab' };
+    });
 
     handle('studio.restart', async () => {
-      // 重启插件 worker（服务为独立进程，不受影响）
       try {
         const manifest = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'orca-plugin.json'), 'utf8'));
-        // 安装副本的 key 是 <publisher>.<id>（package.sh 注入 publisher）；dev 模式是 local.<id>
         const pluginKey = manifest.publisher ? `${manifest.publisher}.${manifest.id}` : `local.${manifest.id}`;
         execFile(ORCA_BIN, ['plugin', 'restart', pluginKey], () => {});
         return { ok: true, restarting: true };
@@ -851,35 +1048,67 @@ function isInstalledPluginPath(target) {
       return renameDesignRoot(input?.skill, input?.root, input?.name);
     });
 
-    // 面板必须传 confirm: true（二次确认），否则拒绝删除
     handle('studio.skill.remove', async (input) => {
       if (input?.confirm !== true) return { ok: false, error: '需要二次确认' };
       return removeDesignRoot(input?.skill, input?.root);
     });
   }
 
-  // Palette commands: open each skill's first discovered project
   for (const s of SKILL_META) {
     reg(`prototype.skill.${s.id}`, async () => {
       return openSkillEditor(s.id, '');
     });
   }
 
-  // Status bar item / shortcut: open the standalone gallery (ensures service first)
-  // 主题跟随由项目库服务读取宿主 profile 的 settings.theme 注入首帧；宿主
-  // appearance.read 只返回 revision，读不到 mode，故不申请 appearance:write。
-  // 状态栏条目运行期反馈：Orca 的 statusBarItems 是 manifest 声明式字段，
-  // worker 无 UI API 可写它。可达的即时反馈通道是 tab 侧：先切/开 tab（URL 带
-  // #opening 哈希，库页读到即显示加载动画），服务冷启动时库页自己每 500ms
-  // 重试 /api/list——点击到看到动画的间隔 = tab switch/create 的 ~0.2-1s。
-  reg('prototype.gallery', async () => openGalleryTab());
+  const manifestHasGalleryPage = (() => {
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'orca-plugin.json'), 'utf8'));
+      return Array.isArray(m?.contributes?.pages) && m.contributes.pages.some((p) => p.id === 'gallery');
+    } catch {
+      return false;
+    }
+  })();
 
-  // 项目库内打开编辑器不再另开标签：iframe 同页跳转由库页自身完成
-  // （保留 openSkillEditor 供 /api/open 与 palette 命令返回编辑器 url）
+  function canOpenHostGalleryPage() {
+    return manifestHasGalleryPage && Boolean(orca.host?.has?.('navigation.openPage'));
+  }
 
-  // 激活预热：worker 常驻（有 statusBarItems 的插件保持运行）——
-  // ① 服务提前拉起或升级热替换（点击时无冷启动）② tab 缓存循环启动（点击走 switch 快路径）
+  async function openGalleryEntry() {
+    if (canOpenHostGalleryPage()) {
+      galleryLoading(true);
+      ensureGalleryRunning({ timeoutMs: STARTUP_TIMEOUT_MS }).catch(() => {});
+      try {
+        const nav = orca.navigation
+          ? await orca.navigation.openPage('gallery')
+          : await orca.host.call('navigation.openPage', { pageId: 'gallery' });
+        if (nav?.opened !== false) {
+          return { ok: true, mode: 'plugin-page', pageId: 'gallery' };
+        }
+      } catch (err) {
+        orca.log(`navigation.openPage fallback: ${err?.message || err}`);
+      } finally {
+        galleryLoading(false);
+      }
+    }
+    return openGalleryTab();
+  }
+
+  reg('prototype.gallery', async () => openGalleryEntry());
+
   startTabCacheLoop();
-  ensureGallery().catch(() => {});
+  ensureGalleryRunning({ timeoutMs: STARTUP_TIMEOUT_MS }).catch(() => {});
   orca.log('Lakala-Design-Plugin worker activated successfully.');
+
+  return {
+    dispose() {
+      if (tabCacheTimer) {
+        clearInterval(tabCacheTimer);
+        tabCacheTimer = null;
+      }
+      if (reresolveTimer) {
+        clearTimeout(reresolveTimer);
+        reresolveTimer = null;
+      }
+    },
+  };
 }

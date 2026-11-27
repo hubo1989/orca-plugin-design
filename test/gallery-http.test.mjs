@@ -115,6 +115,116 @@ test('POST /api/create, GET /api/preview wrapper, and POST /api/forget allMissin
   assert.deepEqual(JSON.parse(cleared.text), { ok: true, removed: 1 });
 });
 
+test('GET /api/health identifies orca-plugin-design on 127.0.0.1', async () => {
+  assert.equal(server.address().address, '127.0.0.1');
+  const r = await hit('/api/health');
+  assert.equal(r.status, 200);
+  const data = JSON.parse(r.text);
+  assert.equal(data.ok, true);
+  assert.equal(data.app, 'orca-plugin-design');
+  assert.equal(typeof data.buildId, 'string');
+  assert.equal(data.pid, process.pid);
+  assert.equal(data.port, port);
+});
+
+test('chunked POST exceeding 64KiB UTF-8 bytes returns 413 {}', async () => {
+  const http = await import('node:http');
+  const multiByte = '中'.repeat(25000); // 75000 bytes in UTF-8, 25000 UTF-16 chars
+  const payload = JSON.stringify({ skill: 'claude-design', root: multiByte });
+  const r = await new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: '/api/register',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: base,
+        host: `127.0.0.1:${port}`,
+        'transfer-encoding': 'chunked',
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.write(payload.slice(0, 10000));
+    req.write(payload.slice(10000));
+    req.end();
+  });
+  assert.equal(r.status, 413);
+  assert.equal(r.text, '{}');
+});
+
+test('path traversal, symlink escapes, and forged artifact records are blocked on all endpoints', async () => {
+  fs.writeFileSync(stateFile, JSON.stringify({
+    workspaceRoot: wsDir,
+    workspaceName: 'test-workspace',
+    updatedAt: Date.now(),
+  }));
+  const outsideDir = path.join(tmpDir, 'outside-secret');
+  fs.mkdirSync(path.join(outsideDir, 'project'), { recursive: true });
+  fs.writeFileSync(path.join(outsideDir, 'project', 'canvas.json'), JSON.stringify({ title: 'Secret' }));
+  fs.writeFileSync(path.join(outsideDir, 'project', 'secret.html'), '<h1>secret</h1>');
+
+  const designDir = path.join(wsDir, '.design');
+  fs.mkdirSync(designDir, { recursive: true });
+  const symlinkLeaf = path.join(designDir, 'escape-leaf');
+  fs.symlinkSync(outsideDir, symlinkLeaf);
+
+  const intermediateDir = path.join(tmpDir, 'outside-parent');
+  const intermediateTarget = path.join(intermediateDir, 'child-work');
+  fs.mkdirSync(path.join(intermediateTarget, 'project'), { recursive: true });
+  fs.writeFileSync(path.join(intermediateTarget, 'project', 'canvas.json'), JSON.stringify({ title: 'Mid' }));
+  const symlinkParent = path.join(designDir, 'escape-parent');
+  fs.symlinkSync(intermediateDir, symlinkParent);
+  const intermediateChild = path.join(symlinkParent, 'child-work');
+
+  // Pre-seed forged artifact records pointing to outside/symlink paths
+  const crypto = await import('node:crypto');
+  const seedForged = (forgedRoot) => {
+    const hash = crypto.createHash('sha256').update(forgedRoot).digest('hex').slice(0, 24);
+    const artifactsDir = path.join(designHome, 'artifacts');
+    fs.mkdirSync(artifactsDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactsDir, `${hash}.json`), JSON.stringify({
+      v: 1,
+      root: forgedRoot,
+      skill: 'claude-design',
+      title: 'Forged',
+      openedAt: new Date().toISOString(),
+    }));
+  };
+  seedForged(symlinkLeaf);
+  seedForged(intermediateChild);
+
+  const traversal = path.join(designDir, '..', '..', 'outside-secret');
+  for (const badRoot of [traversal, symlinkLeaf, intermediateChild]) {
+    const pRes = await hit(`/api/preview?skill=claude-design&root=${encodeURIComponent(badRoot)}`);
+    assert.equal(pRes.status, 403, `preview blocked for ${badRoot}`);
+
+    const tRes = await hit(`/api/thumb?root=${encodeURIComponent(badRoot)}`);
+    assert.equal(tRes.status, 403, `thumb blocked for ${badRoot}`);
+
+    const oRes = await hit('/api/open', {
+      method: 'POST', headers: postHeaders(), body: JSON.stringify({ skill: 'claude-design', root: badRoot }),
+    });
+    assert.equal(oRes.status, 400, `open blocked for ${badRoot}`);
+
+    const dRes = await hit('/api/delete', {
+      method: 'POST', headers: postHeaders(), body: JSON.stringify({ root: badRoot }),
+    });
+    assert.equal(dRes.status, 403, `delete blocked for ${badRoot}`);
+
+    const rRes = await hit('/api/rename', {
+      method: 'POST', headers: postHeaders(), body: JSON.stringify({ skill: 'claude-design', root: badRoot, title: 'Hacked' }),
+    });
+    assert.equal(rRes.status, 400, `rename blocked for ${badRoot}`);
+  }
+  assert.equal(fs.existsSync(path.join(outsideDir, 'project', 'canvas.json')), true, 'outside files untouched');
+  assert.equal(fs.existsSync(path.join(intermediateTarget, 'project', 'canvas.json')), true, 'intermediate files untouched');
+});
+
 test.after(async () => {
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(tmpDir, { recursive: true, force: true });

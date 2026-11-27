@@ -26,16 +26,31 @@ import {
   EXAMPLE_INDEX,
   resolveHostCli,
   resolveHostUserData,
+  resolveHostRuntimeDefaults,
   resolveProfileDb,
   GALLERY_BUILD_ID,
 } from './skills-meta.mjs';
 
+import {
+  resolveRealPath,
+  safeRealPath,
+  isInsideDir,
+  isSameOrInside,
+  validateWorkspacePath,
+  readProfileActiveWorkspace,
+  isForbiddenWorkspacePath,
+  formatWorkspaceError,
+} from './workspace-guard.mjs';
+
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
-const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
+const HOST_USER_DATA = resolveHostUserData(pluginRoot);
+const HOST_RUNTIME = resolveHostRuntimeDefaults(pluginRoot);
+const APP_ID = process.env.ORCA_GALLERY_APP_ID?.trim() || HOST_RUNTIME.appId;
+const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), HOST_RUNTIME.defaultStateFileName);
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
 const ORCA_BIN = resolveHostCli(pluginRoot);
-const PORT = Number(process.env.PORT) || 3480;
+const PORT = Number(process.env.ORCA_GALLERY_PORT || process.env.PORT) || HOST_RUNTIME.defaultPort;
 
 const OFFICIAL_EXAMPLES = BUILTIN_EXAMPLES
   .filter((item) => Object.hasOwn(SKILL_BY_ID, item.skill))
@@ -84,6 +99,7 @@ function dshHome() {
 
 function artifactsDir() { return path.join(dshHome(), 'artifacts'); }
 function trashDir() { return path.join(dshHome(), 'trash'); }
+function dismissedDir() { return path.join(dshHome(), 'dismissed'); }
 function thumbsDir() {
   const dir = path.join(dshHome(), 'thumbs');
   fs.mkdirSync(dir, { recursive: true });
@@ -92,6 +108,30 @@ function thumbsDir() {
 const folderHash = (root) => crypto.createHash('sha256').update(root).digest('hex').slice(0, 24);
 function recordFile(root) { return path.join(artifactsDir(), `${folderHash(root)}.json`); }
 function thumbPath(root) { return path.join(thumbsDir(), `${folderHash(root)}.png`); }
+function dismissedKeys(root) {
+  const keys = new Set();
+  if (typeof root === 'string' && root) {
+    keys.add(folderHash(path.resolve(root)));
+    const real = safeRealPath(root);
+    if (real) keys.add(folderHash(real));
+  }
+  return [...keys];
+}
+function isDismissed(root) {
+  return dismissedKeys(root).some((k) => fs.existsSync(path.join(dismissedDir(), `${k}.json`)));
+}
+function markDismissed(root, skill = '') {
+  const canonical = safeRealPath(root) || path.resolve(String(root || ''));
+  const file = path.join(dismissedDir(), `${folderHash(canonical)}.json`);
+  writeWhole(file, `${JSON.stringify({ v: 1, root: canonical, rawRoot: root, skill, dismissedAt: new Date().toISOString() }, null, 2)}\n`);
+}
+function clearDismissed(root) {
+  for (const k of dismissedKeys(root)) {
+    try { fs.rmSync(path.join(dismissedDir(), `${k}.json`), { force: true }); } catch {}
+  }
+}
+
+const ownedEditorRoots = new Map();
 
 function artifactStatus(skill, root) {
   if (typeof root !== 'string' || !path.isAbsolute(root)) return { valid: false, reason: 'dir_missing' };
@@ -211,33 +251,79 @@ function forgetMissingArtifacts() {
   return { ok: true, removed };
 }
 
-// 预览与登记共用同一根目录边界；真实路径检查阻止 .design 内的符号链接逃逸。
+function hasDotTraversal(rawPath) {
+  return String(rawPath || '').split(/[\\/]+/).some((seg) => seg === '.' || seg === '..');
+}
+
+// 预览与登记及全部读写路由共用同一根目录边界；realpathSync.native 阻止 ../ 与内外指软链逃逸。
 function allowedArtifactRoot(root) {
-  if (typeof root !== 'string' || !path.isAbsolute(root)) return false;
-  if (findArtifact(root)) return true;
-  const ws = readState().workspaceRoot;
-  if (!ws) return false;
-  const designDir = path.resolve(ws, '.design');
-  if (!path.resolve(root).startsWith(designDir + path.sep)) return false;
+  if (typeof root !== 'string' || !root.trim() || root.includes('\0') || !path.isAbsolute(root)) return false;
+  if (hasDotTraversal(root)) return false;
+
+  let lstat;
+  let realTarget;
   try {
-    const realDesignDir = path.join(fs.realpathSync(ws), '.design');
-    return fs.realpathSync(designDir) === realDesignDir &&
-      fs.realpathSync(root).startsWith(realDesignDir + path.sep);
-  } catch { return false; }
+    lstat = fs.lstatSync(root);
+    realTarget = resolveRealPath(root);
+    if (!fs.statSync(realTarget).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+
+  if (isForbiddenWorkspacePath(realTarget, { pluginRoot, hostUserData: HOST_USER_DATA, designHome: dshHome() })) {
+    return false;
+  }
+
+  const state = readState();
+  const ws = state.workspaceRoot;
+  const existingRec = findArtifact(root);
+
+  if (existingRec) {
+    try {
+      if (lstat.isSymbolicLink()) return false;
+      const realParent = resolveRealPath(path.dirname(root));
+      if (!isSameOrInside(realTarget, path.join(realParent, path.basename(root)))) return false;
+      if (ws && isInsideDir(path.resolve(root), path.resolve(ws))) {
+        const realWs = resolveRealPath(ws);
+        if (!isInsideDir(realTarget, realWs)) return false;
+      }
+      if (!ws || !isInsideDir(realTarget, resolveRealPath(ws))) {
+        if (!hasValidArtifact(existingRec.skill, realTarget)) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (!ws) return false;
+  try {
+    const realWs = resolveRealPath(ws);
+    const designDir = path.join(ws, '.design');
+    const realDesignDir = resolveRealPath(designDir);
+    if (!isInsideDir(realDesignDir, realWs)) return false;
+    if (!isInsideDir(path.resolve(root), path.resolve(designDir))) return false;
+    return isInsideDir(realTarget, realDesignDir);
+  } catch {
+    return false;
+  }
 }
 
 function registerArtifact(input) {
   if (!input || typeof input !== 'object' || typeof input.skill !== 'string' || !Object.hasOwn(SKILL_BY_ID, input.skill)) {
     return { ok: false, error: '未知技能' };
   }
-  if (!validWsRoot(input.root)) return { ok: false, error: 'root 必须是存在的绝对目录路径' };
-  const root = path.resolve(input.root);
-  if (!allowedArtifactRoot(root)) return { ok: false, error: 'root 不在工作区 .design/ 内且尚未登记' };
+  if (!validWsRoot(input.root)) return { ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: 'root 必须是存在的绝对目录路径' };
+  const rawRoot = String(input.root);
+  if (hasDotTraversal(rawRoot)) return { ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: '项目目录不在当前工作区安全边界内' };
+  const root = path.resolve(rawRoot);
+  if (!allowedArtifactRoot(root)) return { ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: '项目目录不在当前工作区安全边界内' };
   for (const key of ['title', 'note']) {
     if (input[key] !== undefined && typeof input[key] !== 'string') {
       return { ok: false, error: `${key} 必须是字符串` };
     }
   }
+  clearDismissed(root);
   const before = findArtifact(root);
   const record = before ? { ...before } : {
     v: 1, root, skill: input.skill,
@@ -336,13 +422,35 @@ function moveFolder(from, to) {
   }
 }
 
+function sanitizeDirSlug(raw) {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/[\\/:*?"<>|\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/g, '');
+  if (!s || s === '.' || s === '..') return '';
+  return s;
+}
+
 function trashArtifact(record) {
   const id = `${folderHash(record.root)}-${Date.now()}`;
   const entry = path.join(trashDir(), id);
   try {
+    const now = Date.now();
     for (const name of fs.readdirSync(trashDir())) {
-      if (TRASH_ID.test(name) && !fs.existsSync(path.join(trashDir(), name, 'folder'))) {
-        fs.rmSync(path.join(trashDir(), name), { recursive: true, force: true });
+      if (!TRASH_ID.test(name)) continue;
+      const entryDir = path.join(trashDir(), name);
+      const hasFolder = fs.existsSync(path.join(entryDir, 'folder'));
+      const hasDismissed = fs.existsSync(path.join(entryDir, '.dismissed'));
+      if (!hasFolder && !hasDismissed) {
+        fs.rmSync(entryDir, { recursive: true, force: true });
+      } else if (hasDismissed) {
+        const ts = Number(name.split('-').pop());
+        if (Number.isFinite(ts) && now - ts > 3600_000) {
+          fs.rmSync(entryDir, { recursive: true, force: true });
+        }
       }
     }
   } catch {}
@@ -350,8 +458,15 @@ function trashArtifact(record) {
   fs.writeFileSync(path.join(entry, 'record.json'), `${JSON.stringify(record, null, 2)}\n`);
   const moved = isDeletable(record.skill, record.root);
   const p = path.join(entry, 'folder', path.basename(record.root));
-  if (moved) moveFolder(record.root, p);
-  fs.rmSync(recordFile(record.root), { force: true });
+  if (moved) {
+    moveFolder(record.root, p);
+  } else {
+    // 混合目录绝不删改任何文件，改为写入 dismissed/ 标记防止扫盘复活，并保留撤销元数据窗口
+    fs.writeFileSync(path.join(entry, '.dismissed'), '');
+    markDismissed(record.root, record.skill);
+  }
+  removeArtifactIndex(record.root);
+  ownedEditorRoots.delete(safeRealPath(record.root));
   return { trash: id, moved, path: moved ? p : record.root };
 }
 
@@ -365,6 +480,7 @@ function restoreArtifact(id) {
     if (fs.existsSync(record.root)) throw new Error(`${record.root} is taken`);
     moveFolder(folder, record.root);
   }
+  clearDismissed(record.root);
   delete record.missing;
   writeRecord(record);
   fs.rmSync(entry, { recursive: true, force: true });
@@ -378,45 +494,76 @@ function cleanTitle(raw) {
 }
 
 async function renameArtifact(skill, root, title) {
+  if (!allowedArtifactRoot(root)) {
+    throw new Error('PATH_OUTSIDE_WORKSPACE');
+  }
   const at = TITLES[skill];
   if (!at) throw new Error(`no title to change for ${skill}`);
-  if (skill === 'claude-dashboard' || skill === 'claude-motion') {
-    const metaPath = path.join(root, at[0]);
-    if (fs.existsSync(metaPath)) {
-      try {
+
+  // 先执行磁盘目录重命名（失败则未改写任何文件内容），成功后再更新 JSON title
+  let finalRoot = root;
+  const parentDir = path.dirname(root);
+  const oldBase = path.basename(root);
+  const slug = sanitizeDirSlug(title);
+  if (path.basename(parentDir) === '.design' && slug && slug !== oldBase) {
+    let candidate = slug;
+    let i = 2;
+    while (fs.existsSync(path.join(parentDir, candidate)) && path.join(parentDir, candidate) !== root) {
+      candidate = `${slug}-${i++}`;
+    }
+    const nextRoot = path.join(parentDir, candidate);
+    if (nextRoot !== root) {
+      await stopSkillEditor(skill, root).catch(() => {});
+      moveFolder(root, nextRoot);
+      ownedEditorRoots.delete(safeRealPath(root));
+      finalRoot = nextRoot;
+    }
+  }
+
+  try {
+    if (skill === 'claude-dashboard' || skill === 'claude-motion') {
+      const metaPath = path.join(finalRoot, at[0]);
+      if (fs.existsSync(metaPath)) {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
         meta[at[1]] = title;
         writeWhole(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
-      } catch {}
+      }
+    } else {
+      const file = path.join(finalRoot, at[0]);
+      if (fs.existsSync(file)) {
+        const idx = JSON.parse(fs.readFileSync(file, 'utf8'));
+        writeWhole(file, `${JSON.stringify({ ...idx, [at[1]]: title }, null, 2)}\n`);
+      }
     }
-  } else {
-    const file = path.join(root, at[0]);
-    if (fs.existsSync(file)) {
-      const idx = JSON.parse(fs.readFileSync(file, 'utf8'));
-      writeWhole(file, `${JSON.stringify({ ...idx, [at[1]]: title }, null, 2)}\n`);
+  } catch (err) {
+    if (finalRoot !== root) {
+      try { moveFolder(finalRoot, root); } catch {}
     }
+    throw err;
   }
-  const rec = findArtifact(root);
-  if (rec) {
-    rec.title = title;
-    writeRecord(rec);
+
+  const oldRec = findArtifact(root);
+  let nextRec = oldRec ? { ...oldRec, root: finalRoot, title } : null;
+  if (finalRoot !== root) {
+    removeArtifactIndex(root);
+    if (nextRec) writeRecord(nextRec);
+  } else if (nextRec) {
+    writeRecord(nextRec);
   }
+  return { root: finalRoot, title, record: nextRec };
 }
 
 function installRoot() {
-  return path.join(resolveHostUserData(pluginRoot), 'plugins');
+  return path.join(HOST_USER_DATA, 'plugins');
 }
 function isInstalledPluginPath(target) {
-  const root = path.resolve(installRoot());
-  const p = path.resolve(String(target || ''));
-  return p === root || p.startsWith(root + path.sep);
+  return isForbiddenWorkspacePath(target, { pluginRoot, hostUserData: HOST_USER_DATA, designHome: dshHome() });
 }
 
 const PROFILE_DB = resolveProfileDb(pluginRoot);
 
 function validWsRoot(p) {
-  if (typeof p !== 'string' || !path.isAbsolute(p)) return false;
-  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+  return validateWorkspacePath(p, { pluginRoot, hostUserData: HOST_USER_DATA, designHome: dshHome() }).ok;
 }
 
 let hostSchemeCache = { value: '', at: 0 };
@@ -437,33 +584,90 @@ function hostScheme() {
 
 function readState() {
   const STATE_TTL_MS = 15000;
+  const validateOpts = { pluginRoot, hostUserData: HOST_USER_DATA, designHome: dshHome() };
   let explicit = {};
   try { explicit = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
-  const explicitValid = validWsRoot(explicit.workspaceRoot);
-  const explicitState = explicitValid
+
+  const updatedAt = Number(explicit.updatedAt);
+  const fresh = Number.isFinite(updatedAt) && Date.now() - updatedAt < STATE_TTL_MS;
+  let profileMtimeMs = 0;
+  try { profileMtimeMs = fs.statSync(PROFILE_DB).mtimeMs; } catch {}
+  const profileNewer = Number.isFinite(updatedAt) ? profileMtimeMs > updatedAt : true;
+
+  if (explicit.errorCode && !explicit.workspaceRoot && (fresh || !profileNewer)) {
+    return {
+      workspaceRoot: '',
+      realWorkspaceRoot: '',
+      workspaceName: '',
+      errorCode: explicit.errorCode,
+      errorMessage: explicit.errorMessage || formatWorkspaceError(explicit.errorCode),
+    };
+  }
+
+  const explicitCheck = explicit.workspaceRoot
+    ? validateWorkspacePath(explicit.workspaceRoot, validateOpts)
+    : null;
+  const explicitState = explicitCheck?.ok
     ? {
-        workspaceRoot: explicit.workspaceRoot,
-        workspaceName: explicit.workspaceName || path.basename(explicit.workspaceRoot) || '',
+        workspaceRoot: explicitCheck.workspaceRoot,
+        realWorkspaceRoot: explicitCheck.realWorkspaceRoot,
+        workspaceName: explicit.workspaceName || explicitCheck.workspaceName || '',
+        errorCode: '',
+        errorMessage: '',
       }
     : null;
-  // 点击时写入的焦点快照在短时间内优先消费；超时后优先读宿主 profile DB，
-  // 若宿主无 sqlite3 CLI（如 Windows）或 profile 尚未落盘，则回退保留已知合法快照。
-  const fresh = Number.isFinite(Number(explicit.updatedAt)) &&
-    Date.now() - Number(explicit.updatedAt) < STATE_TTL_MS;
+
   if (fresh && explicitState) return explicitState;
-  try {
-    const out = execFileSync('sqlite3', [PROFILE_DB,
-      "SELECT payload FROM profile_state_documents WHERE domain='workspaceSession'"],
-      { timeout: 3000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    const ws = JSON.parse(out);
-    const id = ws.activeWorktreeId || '';
-    const p = id.includes('::') ? id.split('::').pop() : '';
-    if (validWsRoot(p)) {
-      return { workspaceRoot: p, workspaceName: path.basename(p) || '' };
+
+  const fromProfile = readProfileActiveWorkspace(PROFILE_DB);
+  if (fromProfile) {
+    if (fromProfile.isRemote) {
+      return {
+        workspaceRoot: '',
+        realWorkspaceRoot: '',
+        workspaceName: '',
+        errorCode: 'REMOTE_OR_UNMOUNTED',
+        errorMessage: formatWorkspaceError('REMOTE_OR_UNMOUNTED', { path: fromProfile.rawPath }),
+      };
     }
-  } catch {}
+    const profileCheck = validateWorkspacePath(fromProfile.rawPath, validateOpts);
+    if (profileCheck.ok) {
+      return {
+        workspaceRoot: profileCheck.workspaceRoot,
+        realWorkspaceRoot: profileCheck.realWorkspaceRoot,
+        workspaceName: profileCheck.workspaceName,
+        errorCode: '',
+        errorMessage: '',
+      };
+    }
+    if (profileCheck.code === 'REMOTE_OR_UNMOUNTED' || profileCheck.code === 'FORBIDDEN_WORKSPACE_PATH') {
+      return {
+        workspaceRoot: '',
+        realWorkspaceRoot: '',
+        workspaceName: '',
+        errorCode: profileCheck.code,
+        errorMessage: profileCheck.message,
+      };
+    }
+  }
+
   if (explicitState) return explicitState;
-  return { workspaceRoot: '', workspaceName: '' };
+  if (explicitCheck && !explicitCheck.ok && (explicitCheck.code === 'REMOTE_OR_UNMOUNTED' || explicitCheck.code === 'FORBIDDEN_WORKSPACE_PATH')) {
+    return {
+      workspaceRoot: '',
+      realWorkspaceRoot: '',
+      workspaceName: '',
+      errorCode: explicitCheck.code,
+      errorMessage: explicitCheck.message,
+    };
+  }
+  return {
+    workspaceRoot: '',
+    realWorkspaceRoot: '',
+    workspaceName: '',
+    errorCode: 'NO_WORKSPACE',
+    errorMessage: formatWorkspaceError('NO_WORKSPACE'),
+  };
 }
 
 function artifactCli(skillId) { return path.join(BAOYU_SKILLS_DIR, skillId, 'scripts', 'artifact.mjs'); }
@@ -507,7 +711,7 @@ function projectMeta(skillId, root) {
 function scanDesignProjects(rootDir) {
   const found = [];
   if (!rootDir || !fs.existsSync(rootDir)) return found;
-  const SKIP = new Set(['.git', 'node_modules', '.orca', 'vendor', 'dist', '.venv', '__pycache__', 'build']);
+  const SKIP = new Set(['.git', 'node_modules', '.orca', '.agy-daddy', '.agents', 'trash', 'vendor', 'dist', '.venv', '__pycache__', 'build']);
   (function walk(dir, depth) {
     if (depth > 3) return;
     let entries;
@@ -627,6 +831,7 @@ function listArtifactsViews() {
   if (workspaceRoot) {
     const scanned = scanDesignProjects(workspaceRoot);
     for (const item of scanned) {
+      if (isDismissed(item.root)) continue;
       const existing = map.get(item.root);
       if (!existing) {
         const rec = recordOpened(item.skill, item.root, new Date());
@@ -687,6 +892,7 @@ function listArtifactsViews() {
     artifacts: views,
     workspaceName: state.workspaceName || '',
     workspaceRoot,
+    workspaceError: state.errorCode ? { code: state.errorCode, message: state.errorMessage || '' } : null,
   };
 }
 
@@ -694,7 +900,11 @@ async function openSkillEditor(skillId, rootInput) {
   const meta = SKILL_BY_ID[skillId];
   if (!meta) return { ok: false, error: `unknown skill: ${skillId}` };
   let root = rootInput;
-  if (!root) {
+  if (root) {
+    if (!allowedArtifactRoot(root)) {
+      return { ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: '项目目录不在当前工作区安全边界内' };
+    }
+  } else {
     const roots = listArtifactsViews().artifacts.filter((i) => i.skill === skillId && !i.missing);
     if (!roots.length) return { ok: false, error: `no ${skillId} project` };
     root = roots[0].root;
@@ -708,16 +918,30 @@ async function openSkillEditor(skillId, rootInput) {
   if (!m) return { ok: false, error: `no url in artifact output: ${r.stdout.slice(0, 200)}` };
   try {
     const parsed = JSON.parse(m[0]);
+    const reused = parsed.reused === true;
+    if (!reused) {
+      ownedEditorRoots.set(safeRealPath(root), { root, skill: skillId });
+    }
     recordOpened(skillId, root);
-    return { ok: true, url: parsed.url, reused: parsed.reused === true };
+    return { ok: true, url: parsed.url, reused };
   } catch {
     return { ok: false, error: 'unparsable artifact output' };
   }
 }
 
 async function stopSkillEditor(skillId, root) {
+  if (typeof skillId !== 'string' || !Object.hasOwn(SKILL_BY_ID, skillId)) {
+    return { ok: false, error: `未知技能: ${String(skillId)}` };
+  }
+  ownedEditorRoots.delete(safeRealPath(root));
   const r = await runNode([artifactCli(skillId), 'stop', root]);
   return r.err ? { ok: false, error: r.stderr || r.err.message } : { ok: true };
+}
+
+async function stopOwnedEditors() {
+  const entries = [...ownedEditorRoots.values()];
+  ownedEditorRoots.clear();
+  await Promise.all(entries.map((entry) => stopSkillEditor(entry.skill, entry.root).catch(() => {})));
 }
 
 async function restartEditor(skillId, root) {
@@ -729,18 +953,35 @@ async function createExample(templateId, nameInput) {
   const tpl = EXAMPLE_TEMPLATES[templateId];
   if (!tpl) return { ok: false, error: `${templateId} 项目由 agent 创建（无静态示例模板）` };
   const skillId = tpl.skill || templateId;
-  const base = readState().workspaceRoot || '';
-  if (!base) return { ok: false, error: '当前工作区未识别，请稍后重试' };
-  if (isInstalledPluginPath(base)) {
-    return { ok: false, error: '当前工作区是 Orca 插件安装路径，请切换到其他工作区创建设计项目' };
+  const st = readState();
+  const base = st.workspaceRoot || '';
+  if (!base) {
+    const code = st.errorCode || 'NO_WORKSPACE';
+    return { ok: false, code, error: st.errorMessage || formatWorkspaceError(code) };
   }
-  const safe = String(nameInput || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
-  const baseName = safe || tpl.dirName;
+  const wsCheck = validateWorkspacePath(base, { pluginRoot, hostUserData: HOST_USER_DATA, designHome: dshHome() });
+  if (!wsCheck.ok) {
+    return { ok: false, code: wsCheck.code, error: wsCheck.message };
+  }
+  if (skillId === 'claude-design-system') {
+    const existingDs = scanDesignProjects(base)
+      .filter((item) => item.skill === 'claude-design-system' && !isDismissed(item.root));
+    if (existingDs.length > 0) {
+      return {
+        ok: false,
+        code: 'DESIGN_SYSTEM_EXISTS',
+        root: existingDs[0].root,
+        error: formatWorkspaceError('DESIGN_SYSTEM_EXISTS', { title: existingDs[0].title }),
+      };
+    }
+  }
+  const displayTitle = cleanTitle(nameInput) || tpl.title || '';
+  const baseName = sanitizeDirSlug(nameInput) || tpl.dirName;
   const designDir = path.join(base, '.design');
   let name = baseName, i = 2;
   while (fs.existsSync(path.join(designDir, name))) name = `${baseName}-${i++}`;
   const root = path.join(designDir, name);
-  const displayTitle = safe || tpl.title || name;
+  const finalTitle = displayTitle || name;
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
   for (const [rel, content] of Object.entries(tpl.files)) {
     const p = path.join(root, rel);
@@ -749,7 +990,7 @@ async function createExample(templateId, nameInput) {
       const idx = {
         ...(EXAMPLE_INDEX[templateId] || tpl.index),
         createdOnFiles: { v: 1, at: now },
-        title: displayTitle,
+        title: finalTitle,
         lastChange: { by: 'prototype-studio', at: now, via: 'Orca plugin', note: 'Built-in Lakala template' },
       };
       fs.writeFileSync(p, `${JSON.stringify(idx, null, 2)}\n`);
@@ -757,11 +998,12 @@ async function createExample(templateId, nameInput) {
       fs.writeFileSync(p, content, 'utf8');
     }
   }
+  clearDismissed(root);
   recordOpened(skillId, root);
   const chk = await runNode([artifactCli(skillId), 'check', root]);
   let problems = null;
   try { problems = JSON.parse(chk.stdout).problems ?? null; } catch {}
-  return { ok: true, root, skill: skillId, problems };
+  return { ok: true, root, skill: skillId, title: finalTitle, problems };
 }
 
 function galleryHtml(requestedLang = 'zh', requestedScheme = '') {
@@ -786,21 +1028,35 @@ function buildStarter(rec, skill) {
 }
 
 async function launchAgent(starter, agent) {
+  const st = readState();
+  const ws = st.workspaceRoot || '';
+  if (!ws) {
+    const code = st.errorCode || 'NO_WORKSPACE';
+    return {
+      ok: false,
+      code,
+      fallback: 'clipboard',
+      starter,
+      error: st.errorMessage || formatWorkspaceError(code),
+    };
+  }
   const r = await new Promise((resolve) => {
     execFile(ORCA_BIN, [
       'agent', 'launch', '--agent', agent,
-      '--worktree', `path:${readState().workspaceRoot || ''}`,
+      '--worktree', `path:${ws}`,
       '--surface', 'chat', '--focus',
       '--prompt', starter, '--json',
     ], { timeout: 20000 }, (err, stdout) => resolve({ err, stdout: String(stdout || '') }));
   });
-  if (r.err) return { ok: false, error: `Agent 启动失败: ${r.err.message}`, starter };
+  if (r.err) return { ok: false, fallback: 'clipboard', error: `Agent 启动失败: ${r.err.message}`, starter };
   try {
     const j = JSON.parse(r.stdout);
-    if (!j.ok) return { ok: false, error: j.error?.message || 'agent launch 返回失败', starter };
+    if (!j || j.ok !== true) {
+      return { ok: false, fallback: 'clipboard', error: j?.error?.message || 'agent launch 返回失败', starter };
+    }
     return { ok: true, outcome: j.result?.outcome?.kind || 'chat', starter };
   } catch {
-    return { ok: true, outcome: 'launched', starter };
+    return { ok: false, fallback: 'clipboard', error: 'agent launch 返回不可解析输出', starter };
   }
 }
 
@@ -809,17 +1065,41 @@ function cleanAgentId(v) {
 }
 
 async function startFromArtifact(input) {
+  const st = readState();
+  const checkWs = (starter) => {
+    if (!st.workspaceRoot) {
+      const code = st.errorCode || 'NO_WORKSPACE';
+      return {
+        ok: false,
+        code,
+        fallback: 'clipboard',
+        starter,
+        error: st.errorMessage || formatWorkspaceError(code),
+      };
+    }
+    return null;
+  };
+
+  if (input.skill) {
+    const s = SKILL_BY_ID[String(input.skill)];
+    if (!s) return { ok: false, error: `未知技能: ${input.skill}` };
+    const blocked = checkWs(s.prompt);
+    if (blocked) return blocked;
+    return launchAgent(s.prompt, cleanAgentId(input.agent));
+  }
   if (input.example) {
     const example = OFFICIAL_EXAMPLES.find((x) => x.id === String(input.example));
     if (!example) return { ok: false, error: '未知官方示例' };
-    if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
     const starter = `${SKILL_BY_ID[example.skill].prompt}${example.desc}\n参考拉卡拉内置设计系统（品牌青 #00B9F1 / 深海蓝 #0B3875 / 交互蓝 #007FA8）与示例要素：${example.points}。请在当前工作区 .design/ 内创建新项目。`;
+    const blocked = checkWs(starter);
+    if (blocked) return blocked;
     return launchAgent(starter, cleanAgentId(input.agent));
   }
   if (input.recipe) {
     const r = RECIPES.find((x) => x.id === String(input.recipe));
     if (!r) return { ok: false, error: '未知工作流' };
-    if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
+    const blocked = checkWs(r.template);
+    if (blocked) return blocked;
     return launchAgent(r.template, cleanAgentId(input.agent));
   }
   const root = String(input.root || '');
@@ -827,17 +1107,24 @@ async function startFromArtifact(input) {
   if (!rec) return { ok: false, error: '未找到该作品的记录' };
   const skill = SKILL_BY_ID[rec.skill];
   if (!skill) return { ok: false, error: `未知技能: ${rec.skill}` };
-  if (!readState().workspaceRoot) return { ok: false, error: '工作区未识别，无法启动 Agent' };
-  return launchAgent(buildStarter(rec, skill), cleanAgentId(input.agent));
+  const starter = buildStarter(rec, skill);
+  const blocked = checkWs(starter);
+  if (blocked) return blocked;
+  return launchAgent(starter, cleanAgentId(input.agent));
 }
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   res.setHeader('content-type', url.pathname === '/' ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8');
-  const allowedGet = ['/', '/api/list', '/api/preview', '/api/thumb'];
+  const allowedGet = ['/', '/api/health', '/api/list', '/api/preview', '/api/thumb'];
   // 所有状态变更都走 POST + guardPost；/api/open 会拉起编辑器，/api/open-url 会跳转，
   // 二者留在 GET 白名单会让跨站页面绕过收口（simple request 不触发 CORS 预检）。
-  const allowedPost = ['/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore', '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor', '/api/shutdown', '/api/start', '/api/register', '/api/forget'];
+  const allowedPost = [
+    '/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore',
+    '/api/create', '/api/create-example', '/api/rename', '/api/stop',
+    '/api/restart', '/api/restart-editor', '/api/shutdown', '/api/start',
+    '/api/register', '/api/forget', '/api/forget-missing',
+  ];
   if (!((req.method === 'GET' && allowedGet.includes(url.pathname)) || (req.method === 'POST' && allowedPost.includes(url.pathname)))) {
     res.statusCode = 404; return res.end('{}');
   }
@@ -849,13 +1136,30 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET') {
     if (url.pathname === '/') return res.end(galleryHtml(url.searchParams.get('lang'), url.searchParams.get('scheme')));
+    if (url.pathname === '/api/health') {
+      const st = readState();
+      const addr = server.address();
+      const activePort = (addr && typeof addr === 'object' && addr.port) ? addr.port : PORT;
+      return finish({
+        ok: true,
+        app: APP_ID,
+        buildId: GALLERY_BUILD_ID,
+        pid: process.pid,
+        port: activePort,
+        workspaceRoot: st.workspaceRoot || '',
+        workspaceName: st.workspaceName || '',
+      });
+    }
     if (url.pathname === '/api/list') return finish(listArtifactsViews());
     const skill = url.searchParams.get('skill') || '';
     const root = url.searchParams.get('root') || '';
     if (url.pathname === '/api/preview' || url.pathname === '/api/thumb') {
-      const allowed = allowedArtifactRoot(root);
+      if (!allowedArtifactRoot(root)) {
+        res.statusCode = 403;
+        return finish({ ok: false, code: 'PATH_OUTSIDE_WORKSPACE' });
+      }
       const isThumb = url.pathname === '/api/thumb';
-      const file = allowed ? (isThumb ? thumbPath(root) : previewEntry(root, skill)) : null;
+      const file = isThumb ? thumbPath(root) : previewEntry(root, skill);
       if (!file) { res.statusCode = 404; return res.end(); }
       try {
         const content = isThumb ? fs.readFileSync(file) : renderPreviewDocument(file, skill);
@@ -871,21 +1175,47 @@ const server = http.createServer((req, res) => {
     req.resume();
     res.statusCode = 413; return res.end('{}');
   }
-  let body = '';
+  const chunks = [];
+  let byteLen = 0;
   let tooLarge = false;
-  req.on('data', (c) => {
-    if (tooLarge) return;
-    body += c;
-    if (body.length > MAX_BODY_BYTES) tooLarge = true;
+  req.on('data', (chunk) => {
+    if (tooLarge) return; // 继续消费排空流，不主动 destroy socket
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    byteLen += buf.length;
+    if (byteLen > MAX_BODY_BYTES) {
+      tooLarge = true;
+      chunks.length = 0;
+      return;
+    }
+    chunks.push(buf);
   });
   req.on('end', async () => {
     if (tooLarge) { res.statusCode = 413; return res.end('{}'); }
+    const body = Buffer.concat(chunks).toString('utf8');
     let input = {};
     try {
       const parsed = JSON.parse(body || '{}');
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed;
     } catch {}
     const skill = input.skill || '', root = input.root || '';
+
+    const WORKSPACE_MUTATION_ROUTES = new Set([
+      '/api/register', '/api/open', '/api/open-url',
+      '/api/forget', '/api/forget-missing', '/api/update',
+      '/api/delete', '/api/restore', '/api/rename',
+      '/api/stop', '/api/restart-editor',
+    ]);
+    if (WORKSPACE_MUTATION_ROUTES.has(url.pathname)) {
+      const st = readState();
+      if (!st.workspaceRoot) {
+        res.statusCode = 403;
+        return finish({
+          ok: false,
+          code: st.errorCode || 'NO_WORKSPACE',
+          error: st.errorMessage || formatWorkspaceError('NO_WORKSPACE'),
+        });
+      }
+    }
 
     if (url.pathname === '/api/register') {
       const result = registerArtifact(input);
@@ -903,22 +1233,40 @@ const server = http.createServer((req, res) => {
       return finish(r);
     }
     if (url.pathname === '/api/start') return finish(await startFromArtifact(input));
+    if (url.pathname === '/api/forget-missing') return finish(forgetMissingArtifacts());
     if (url.pathname === '/api/forget') {
       if (input.allMissing === true) return finish(forgetMissingArtifacts());
       return finish(forgetArtifact(input.root));
     }
     if (url.pathname === '/api/update') {
+      if (!allowedArtifactRoot(root)) {
+        res.statusCode = 403;
+        return finish({ ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: 'PATH_OUTSIDE_WORKSPACE' });
+      }
       const rec = findArtifact(root);
       if (!rec) return finish({ ok: false, error: 'not recorded' });
-      if (typeof input.pinned === 'boolean') rec.pinned = input.pinned;
+      let latestRec = rec;
       if (input.title) {
         const clean = cleanTitle(input.title);
-        if (clean) await renameArtifact(rec.skill, root, clean);
+        if (clean) {
+          const renamed = await renameArtifact(rec.skill, root, clean);
+          if (renamed?.record) latestRec = renamed.record;
+          else latestRec.title = clean;
+        }
       }
-      writeRecord(rec);
-      return finish({ ok: true, record: rec });
+      if (typeof input.pinned === 'boolean') {
+        latestRec.pinned = input.pinned;
+        writeRecord(latestRec);
+      } else if (!input.title) {
+        writeRecord(latestRec);
+      }
+      return finish({ ok: true, root: latestRec.root, title: latestRec.title, record: latestRec });
     }
     if (url.pathname === '/api/delete') {
+      if (!allowedArtifactRoot(root)) {
+        res.statusCode = 403;
+        return finish({ ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: 'PATH_OUTSIDE_WORKSPACE' });
+      }
       const rec = findArtifact(root);
       if (!rec) return finish({ ok: false, error: 'not recorded' });
       try {
@@ -937,26 +1285,47 @@ const server = http.createServer((req, res) => {
         return finish({ ok: false, error: e.message });
       }
     }
-    if (url.pathname === '/api/create') return finish(await createExample(skill, input.name));
+    if (url.pathname === '/api/create' || url.pathname === '/api/create-example') {
+      return finish(await createExample(skill || input.templateId || '', input.name));
+    }
     if (url.pathname === '/api/rename') {
       const clean = cleanTitle(input.name || input.title);
       if (!clean) return finish({ ok: false, error: 'invalid title' });
+      if (!allowedArtifactRoot(root)) {
+        res.statusCode = 400;
+        return finish({ ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: '项目目录不在当前工作区安全边界内' });
+      }
       try {
-        await renameArtifact(skill, root, clean);
-        return finish({ ok: true });
+        const targetSkill = skill || findArtifact(root)?.skill || '';
+        const renamed = await renameArtifact(targetSkill, root, clean);
+        return finish({ ok: true, root: renamed.root, title: renamed.title, record: renamed.record });
       } catch (e) {
         return finish({ ok: false, error: e.message });
       }
     }
-    if (url.pathname === '/api/stop') return finish(await stopSkillEditor(skill, root));
-    if (url.pathname === '/api/restart-editor') return finish(await restartEditor(skill, root));
+    if (url.pathname === '/api/stop') {
+      if (!allowedArtifactRoot(root)) {
+        res.statusCode = 403;
+        return finish({ ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: 'PATH_OUTSIDE_WORKSPACE' });
+      }
+      return finish(await stopSkillEditor(skill, root));
+    }
+    if (url.pathname === '/api/restart-editor') {
+      if (!allowedArtifactRoot(root)) {
+        res.statusCode = 403;
+        return finish({ ok: false, code: 'PATH_OUTSIDE_WORKSPACE', error: 'PATH_OUTSIDE_WORKSPACE' });
+      }
+      return finish(await restartEditor(skill, root));
+    }
     if (url.pathname === '/api/shutdown') {
+      await stopOwnedEditors();
       finish({ ok: true, shuttingDown: true });
       server.close(() => process.exit(0));
       setTimeout(() => process.exit(0), 250).unref?.();
       return;
     }
     if (url.pathname === '/api/restart') {
+      await stopOwnedEditors();
       finish({ ok: true, restarting: true });
       server.close(() => {
         try {
@@ -974,6 +1343,7 @@ export {
   listArtifactsViews,
   openSkillEditor,
   stopSkillEditor,
+  stopOwnedEditors,
   trashArtifact,
   restoreArtifact,
   renameArtifact,
@@ -985,6 +1355,8 @@ export {
   forgetMissingArtifacts,
   hasValidArtifact,
   previewEntry,
+  allowedArtifactRoot,
+  isDismissed,
   server,
 };
 
@@ -998,6 +1370,13 @@ function isDirectEntry() {
 }
 
 if (isDirectEntry()) {
+  const shutdownOnSignal = async () => {
+    await stopOwnedEditors().catch(() => {});
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 250).unref?.();
+  };
+  process.on('SIGTERM', shutdownOnSignal);
+  process.on('SIGINT', shutdownOnSignal);
   server.on('error', (e) => console.error('gallery server error:', e.message));
   server.listen(PORT, '127.0.0.1', () => console.log(`gallery listening on ${PORT}`));
 }
