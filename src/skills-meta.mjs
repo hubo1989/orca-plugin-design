@@ -101,7 +101,15 @@ export function resolveHostCli(pluginRoot = __defaultPluginRoot) {
 export function computeGalleryBuildId(pluginRoot = __defaultPluginRoot) {
   const hash = crypto.createHash('sha256');
   hash.update(String(pluginRoot));
-  for (const rel of ['src/gallery-server.mjs', 'src/gallery-ui.mjs', 'src/builtin-library.mjs', 'src/skills-meta.mjs']) {
+  for (const rel of [
+    'src/gallery-server.mjs',
+    'src/gallery-ui.mjs',
+    'src/builtin-library.mjs',
+    'src/skills-meta.mjs',
+    'src/workspace-guard.mjs',
+    'src/post-guard.mjs',
+    'src/gallery-page.html',
+  ]) {
     try {
       hash.update(fs.readFileSync(path.join(pluginRoot, rel)));
     } catch {}
@@ -238,7 +246,7 @@ export const EDITOR_FILES = [
   'exports',
 ];
 
-export const NOT_CONTENT = new Set([...EDITOR_FILES, '.sessions.json', '.git', 'node_modules', '.orca', 'dist']);
+export const NOT_CONTENT = new Set([...EDITOR_FILES, '.sessions.json', '.git', 'node_modules', '.orca', '.agy-daddy', '.agents', 'dist']);
 
 // 内置拉卡拉默认设计系统与精选成品示例模板（单一数据源）
 export {
