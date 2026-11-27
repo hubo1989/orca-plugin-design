@@ -20,7 +20,6 @@ test('AC-10: dual-host (Orca + Agy) shares <workspace>/.design/ with isolated pr
   fs.writeFileSync(orcaState, JSON.stringify({ workspaceRoot: wsDir, workspaceName: 'shared-workspace', updatedAt: Date.now() }));
 
   // Simulated Agy peer service sharing the same workspace/.design/
-  let agyEditorStopped = false;
   const agyPeer = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.url === '/api/health') {
@@ -34,7 +33,16 @@ test('AC-10: dual-host (Orca + Agy) shares <workspace>/.design/ with isolated pr
   // Create an Agy-authored work in <workspace>/.design/agy-deck
   const agyWorkRoot = path.join(wsDir, '.design', 'agy-deck');
   fs.mkdirSync(path.join(agyWorkRoot, 'project', 'slides'), { recursive: true });
-  fs.writeFileSync(path.join(agyWorkRoot, 'project', 'deck.json'), JSON.stringify({ title: 'Agy Deck', order: ['s1'] }));
+  fs.writeFileSync(path.join(agyWorkRoot, 'project', 'deck.json'), JSON.stringify({
+    v: 4,
+    title: 'Agy Deck',
+    lists: 'css',
+    order: ['s1'],
+    cover: 's1',
+    sections: {},
+    faces: {},
+    designSystems: [],
+  }));
   fs.writeFileSync(path.join(agyWorkRoot, 'project', 'slides', 's1.html'), '<section><h1>Agy</h1></section>');
 
   // Launch Orca gallery-server.mjs as a child process on an ephemeral port
@@ -90,46 +98,61 @@ test('AC-10: dual-host (Orca + Agy) shares <workspace>/.design/ with isolated pr
     assert.equal(fs.readdirSync(agyHome).length, 0, 'Agy private home untouched by Orca');
     assert.ok(fs.existsSync(path.join(orcaHome, 'artifacts')));
 
-    // Start a fake "Agy-owned" editor process on agyWorkRoot (writes .artifact-server.json)
-    const agyEditor = http.createServer((req, res) => { res.end('ok'); });
-    await new Promise((resolve) => agyEditor.listen(0, '127.0.0.1', resolve));
-    const agyEditorPort = agyEditor.address().port;
-    const editorMarker = path.join(agyWorkRoot, '.artifact-server.json');
-    fs.writeFileSync(editorMarker, JSON.stringify({ port: agyEditorPort, pid: process.pid, url: `http://127.0.0.1:${agyEditorPort}` }));
-    agyEditor.on('close', () => { agyEditorStopped = true; });
+    // Start a real "Agy-owned" editor process on agyWorkRoot via artifact.mjs open
+    const slidesCli = path.join(REPO_ROOT, 'vendor', 'baoyu-design', 'skills', 'claude-slides', 'scripts', 'artifact.mjs');
+    const agyOpenOut = await new Promise((resolve, reject) => {
+      execFile(process.execPath, [slidesCli, 'open', agyWorkRoot, '--port', '0'], { timeout: 15000 }, (err, stdout, stderr) => {
+        if (err) reject(new Error(stderr || err.message));
+        else resolve(stdout);
+      });
+    });
+    const agyOpenJson = JSON.parse(agyOpenOut.match(/\{[\s\S]*"url"[\s\S]*\}/)[0]);
 
-    // Orca opens agyWorkRoot -> artifact.mjs sees .artifact-server.json and reuses it (reused: true)
-    //Wait: artifact.mjs checks process.kill(pid, 0) / port health, or launches if not matching artifact server.
-    // What matters for shutdown: if Orca opens an editor and reused===true, Orca does NOT add it to ownedEditorRoots;
-    // when Orca shuts down, agyEditor and agyPeer must remain alive!
-    const openOrca = await (await fetch(`${orcaBase}/api/open`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin: orcaBase, host: `127.0.0.1:${orcaPort}` },
-      body: JSON.stringify({ skill: 'claude-design', root: orcaCreate.root }),
-    })).json();
-    assert.equal(openOrca.ok, true, `Orca opened its own editor: ${openOrca.url}`);
-
-    // Shutdown Orca gallery server -> must stop Orca-owned editor, NOT agyEditor or agyPeer
-    const shut = await (await fetch(`${orcaBase}/api/shutdown`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin: orcaBase, host: `127.0.0.1:${orcaPort}` },
-      body: '{}',
-    })).json();
-    assert.equal(shut.ok, true);
-
-    await new Promise((r) => setTimeout(r, 300));
-    assert.equal(agyEditorStopped, false, 'Agy editor must NOT be stopped by Orca shutdown');
-    assert.equal(agyPeer.listening, true, 'Agy peer gallery server must remain alive');
-
-    // Verify Orca-owned editor was stopped (port no longer listening)
-    let orcaEditorAlive = false;
     try {
-      await fetch(openOrca.url, { signal: AbortSignal.timeout(300) });
-      orcaEditorAlive = true;
-    } catch {}
-    assert.equal(orcaEditorAlive, false, 'Orca-owned editor stopped on /api/shutdown');
+      // Orca opens shared agyWorkRoot -> reuses Agy's running editor (reused: true, NOT owned by Orca)
+      const openShared = await (await fetch(`${orcaBase}/api/open`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: orcaBase, host: `127.0.0.1:${orcaPort}` },
+        body: JSON.stringify({ skill: 'claude-slides', root: agyWorkRoot }),
+      })).json();
+      assert.equal(openShared.ok, true);
+      assert.equal(openShared.reused, true, 'Orca reuses Agy-started shared editor');
+      assert.equal(openShared.url, agyOpenJson.url);
 
-    await new Promise((resolve) => agyEditor.close(resolve));
+      // Orca opens its own editor on orcaCreate.root (reused: false, owned by Orca)
+      const openOrca = await (await fetch(`${orcaBase}/api/open`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: orcaBase, host: `127.0.0.1:${orcaPort}` },
+        body: JSON.stringify({ skill: 'claude-design', root: orcaCreate.root }),
+      })).json();
+      assert.equal(openOrca.ok, true, `Orca opened its own editor: ${openOrca.url}`);
+      assert.equal(openOrca.reused, false);
+
+      // Shutdown Orca gallery server -> must stop Orca-owned editor, NOT Agy's reused editor or Agy peer
+      const shut = await (await fetch(`${orcaBase}/api/shutdown`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: orcaBase, host: `127.0.0.1:${orcaPort}` },
+        body: '{}',
+      })).json();
+      assert.equal(shut.ok, true);
+
+      await new Promise((r) => setTimeout(r, 300));
+      const agyEditorProbe = await fetch(agyOpenJson.url, { signal: AbortSignal.timeout(1000) });
+      assert.equal(agyEditorProbe.ok, true, 'Agy-owned reused editor must remain alive after Orca shutdown');
+      assert.equal(agyPeer.listening, true, 'Agy peer gallery server must remain alive');
+
+      // Verify Orca-owned editor was stopped (port no longer listening)
+      let orcaEditorAlive = false;
+      try {
+        await fetch(openOrca.url, { signal: AbortSignal.timeout(300) });
+        orcaEditorAlive = true;
+      } catch {}
+      assert.equal(orcaEditorAlive, false, 'Orca-owned editor stopped on /api/shutdown');
+    } finally {
+      await new Promise((resolve) => {
+        execFile(process.execPath, [slidesCli, 'stop', agyWorkRoot], { timeout: 5000 }, () => resolve());
+      });
+    }
   } finally {
     try { child.kill('SIGKILL'); } catch {}
     await new Promise((resolve) => agyPeer.close(resolve));

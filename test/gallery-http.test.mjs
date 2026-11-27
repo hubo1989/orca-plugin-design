@@ -51,6 +51,9 @@ test('GET state-changing routes are closed', async () => {
   assert.equal((await hit('/api/open?skill=claude-design')).status, 404);
   assert.equal((await hit('/api/open-url?skill=claude-design')).status, 404);
   assert.equal((await hit('/api/delete?root=/tmp')).status, 404);
+  assert.equal((await hit('/api/rename?root=/tmp&title=x')).status, 404);
+  assert.equal((await hit('/api/create?skill=claude-slides')).status, 404);
+  assert.equal((await hit('/api/update?root=/tmp&title=x')).status, 404);
 });
 
 test('POST guard rejects cross-site simple and JSON requests', async () => {
@@ -220,6 +223,21 @@ test('path traversal, symlink escapes, and forged artifact records are blocked o
       method: 'POST', headers: postHeaders(), body: JSON.stringify({ skill: 'claude-design', root: badRoot, title: 'Hacked' }),
     });
     assert.equal(rRes.status, 400, `rename blocked for ${badRoot}`);
+
+    const uRes = await hit('/api/update', {
+      method: 'POST', headers: postHeaders(), body: JSON.stringify({ root: badRoot, title: 'Hacked' }),
+    });
+    assert.equal(uRes.status, 403, `update blocked for ${badRoot}`);
+
+    const regRes = await hit('/api/register', {
+      method: 'POST', headers: postHeaders(), body: JSON.stringify({ skill: 'claude-design', root: badRoot }),
+    });
+    assert.equal(regRes.status, 400, `register blocked for ${badRoot}`);
+
+    const ouRes = await hit('/api/open-url', {
+      method: 'POST', headers: postHeaders(), body: JSON.stringify({ skill: 'claude-design', root: badRoot }),
+    });
+    assert.equal(ouRes.status, 400, `open-url blocked for ${badRoot}`);
   }
   assert.equal(fs.existsSync(path.join(outsideDir, 'project', 'canvas.json')), true, 'outside files untouched');
   assert.equal(fs.existsSync(path.join(intermediateTarget, 'project', 'canvas.json')), true, 'intermediate files untouched');

@@ -508,10 +508,10 @@ export default async function activate(orca) {
           pid: Number(data.pid) || null,
         };
       }
-      // 兼容旧版 v0.2.1 升级热替换：/api/health 404 '{}' 时补探一次 /api/list
+      // 兼容旧版 v0.2.1 升级热替换：/api/health 404 '{}' 时补探一次 /api/list（宽松超时避免大工作区冷扫误判占口）
       if (r.status === 404 && text.trim() === '{}') {
         try {
-          const lr = await fetch(`${baseUrl}api/list`, { signal: AbortSignal.timeout(200) });
+          const lr = await fetch(`${baseUrl}api/list`, { signal: AbortSignal.timeout(Math.max(500, timeoutMs)) });
           const ld = await lr.json().catch(() => null);
           if (
             lr.status === 200
@@ -522,7 +522,11 @@ export default async function activate(orca) {
           ) {
             return { alive: true, mine: true, match: false, legacy: true, pid: null };
           }
-        } catch {}
+        } catch (err) {
+          if (err?.name !== 'TimeoutError' && err?.name !== 'AbortError') {
+            return { alive: false, mine: false };
+          }
+        }
       }
       return { alive: true, mine: false };
     } catch {
@@ -579,6 +583,9 @@ export default async function activate(orca) {
 
   let gallerySpawnInFlight = null;
   async function ensureGalleryRunning({ timeoutMs = STARTUP_TIMEOUT_MS } = {}) {
+    if (GALLERY_SCRIPT === '/dev/null') {
+      return { ok: true, warm: false, stub: true, port: GALLERY_PORT };
+    }
     const health = await probeGalleryHealth(GALLERY_PORT, Math.min(500, timeoutMs));
     if (health.alive && health.mine && health.match) {
       return { ok: true, warm: true, port: GALLERY_PORT, buildId: health.buildId };
@@ -590,9 +597,6 @@ export default async function activate(orca) {
         port: GALLERY_PORT,
         error: formatWorkspaceError('PORT_OCCUPIED_BY_OTHER', { port: GALLERY_PORT }),
       };
-    }
-    if (GALLERY_SCRIPT === '/dev/null') {
-      return { ok: true, warm: false, stub: true, port: GALLERY_PORT };
     }
     if (!gallerySpawnInFlight) {
       gallerySpawnInFlight = (async () => {
@@ -823,7 +827,7 @@ export default async function activate(orca) {
         if (cachedPageWsRoot !== openRoot) invalidateGalleryTabCache();
         cachedPageWsRoot = openRoot;
 
-        if (initialHealth.alive && !initialHealth.mine) {
+        if (!gallerySpawnInFlight && initialHealth.alive && !initialHealth.mine) {
           return {
             ok: false,
             code: 'PORT_OCCUPIED_BY_OTHER',

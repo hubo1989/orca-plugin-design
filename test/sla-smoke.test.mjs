@@ -115,6 +115,11 @@ test('AC-1 & AC-2: <=16ms feedback, activate < 20ms, 3-click dedupe, single tab 
   assert.deepEqual(r2, r1);
   assert.deepEqual(r3, r1);
   assert.ok(coldMs < 3000, `cold open < 3000ms (got ${coldMs.toFixed(1)}ms)`);
+  assert.equal(statusUpdates.at(-1).payload.text, 'Design', 'statusBar resets to Design after open');
+
+  // Immediate click within 2s success throttle returns reused+throttled
+  const throttledRes = await gallery();
+  assert.deepEqual(throttledRes, { ok: true, reused: true, throttled: true });
 
   const calls = fs.readFileSync(env.logPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => l.split('\t').filter(Boolean));
   const tabListCalls = calls.filter((a) => a[0] === 'tab' && a[1] === 'list');
@@ -307,4 +312,110 @@ test('AC-2 UI: #opening skeleton polls at 500ms and switches to START_TIMEOUT er
   await new Promise((r) => setTimeout(r, 280));
   assert.ok(ids.get('container').innerHTML.includes('data-error-code="START_TIMEOUT"'), 'switches to START_TIMEOUT error card after timeout');
   assert.ok(ids.get('retryBootBtn'), 'renders retry button');
+});
+
+test('AC-5: legacy v0.2.1 server is smoothly hot-replaced on open, and UI shows PORT_OCCUPIED_BY_OTHER card', async () => {
+  let legacyShutdownCalled = false;
+  const legacyServer = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/api/health') {
+      res.statusCode = 404;
+      return res.end('{}');
+    }
+    if (req.url === '/api/list') {
+      return res.end(JSON.stringify({ ok: true, artifacts: [], workspaceRoot: '', workspaceName: '' }));
+    }
+    if (req.url === '/api/shutdown' && req.method === 'POST') {
+      legacyShutdownCalled = true;
+      res.end(JSON.stringify({ ok: true }));
+      legacyServer.close();
+      legacyServer.closeAllConnections?.();
+      return;
+    }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  await new Promise((resolve) => legacyServer.listen(0, '127.0.0.1', resolve));
+  const port = legacyServer.address().port;
+
+  const env = makeSandboxEnv(port);
+  process.env.ORCA_CLI_COMMAND = env.cliPath;
+  process.env.ORCA_STATE_FILE = env.stateFile;
+  process.env.ORCA_PROFILE_DB = env.profileDb;
+  process.env.ORCA_DESIGN_HOME = env.designHome;
+  process.env.ORCA_GALLERY_PORT = String(port);
+  process.env.ORCA_GALLERY_SCRIPT = path.join(REPO_ROOT, 'src', 'gallery-server.mjs');
+  process.env.ORCA_STARTUP_TIMEOUT_MS = '8000';
+
+  const { orca, cmds } = createHostMock(env.wsDir);
+  const handle = await activateWorker(orca);
+  const res = await cmds.get('prototype.gallery')();
+  assert.equal(legacyShutdownCalled, true, 'legacy v0.2.1 server was gracefully shut down');
+  assert.equal(res.ok, true, `hot-replaced server opened gallery: ${res.error || ''}`);
+
+  const health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json();
+  assert.equal(health.app, 'orca-plugin-design');
+
+  await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, host: `127.0.0.1:${port}` },
+    body: '{}',
+  }).catch(() => {});
+  handle.dispose();
+  fs.rmSync(env.dir, { recursive: true, force: true });
+
+  // UI PORT_OCCUPIED_BY_OTHER card test
+  const html = galleryHtml('zh');
+  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][1][1];
+  const ids = new Map();
+  const makeEl = (id) => {
+    const attrs = new Map();
+    const el = {
+      id, className: '', style: {}, dataset: {}, textContent: '', value: '', disabled: false, _innerHTML: '',
+      setAttribute(k, v) { attrs.set(k, String(v)); },
+      getAttribute(k) { return attrs.get(k) ?? null; },
+      removeAttribute(k) { attrs.delete(k); },
+      addEventListener() {},
+      querySelectorAll: () => [],
+      querySelector: () => null,
+      classList: { add() {}, remove() {}, contains: () => false },
+    };
+    Object.defineProperty(el, 'innerHTML', {
+      get: () => el._innerHTML,
+      set: (v) => {
+        el._innerHTML = String(v);
+        for (const m of el._innerHTML.matchAll(/\bid="([^"]+)"/g)) {
+          if (!ids.has(m[1])) ids.set(m[1], makeEl(m[1]));
+        }
+      },
+    });
+    if (id) ids.set(id, el);
+    return el;
+  };
+  for (const m of html.matchAll(/\bid="([^"]+)"/g)) makeEl(m[1]);
+  const document = {
+    documentElement: makeEl('html'),
+    body: makeEl('body'),
+    getElementById: (id) => ids.get(id) || null,
+    querySelector: () => makeEl('q'),
+    querySelectorAll: () => [],
+  };
+  const ctx = vm.createContext({
+    window: { document, addEventListener() {}, __ORCA_BOOT_TIMEOUT_MS__: 300, __ORCA_BOOT_POLL_MS__: 40 },
+    document,
+    location: { search: '', hash: '#opening', pathname: '/', port: '3480' },
+    history: { replaceState() {}, pushState() {} },
+    fetch: async (url) => {
+      if (String(url).includes('/api/health')) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, app: 'third-party-app' }) };
+      }
+      throw new Error('unexpected');
+    },
+    navigator: { clipboard: { writeText: async () => {} } },
+    localStorage: { getItem: () => null, setItem() {} },
+    setTimeout, clearTimeout, URL, URLSearchParams, Intl, Map, Set, Promise, Date, Object, Array, JSON, Math, Number, String, Boolean, RegExp, encodeURIComponent,
+  });
+  vm.runInContext(script, ctx);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.ok(ids.get('container').innerHTML.includes('data-error-code="PORT_OCCUPIED_BY_OTHER"'));
 });
