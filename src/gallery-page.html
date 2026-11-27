@@ -2265,6 +2265,9 @@ function scopedArtifacts() {
 function missingArtifacts() {
   return state.artifacts.filter((a) => a.missing);
 }
+function isReadOnlyHistory() {
+  return !state.workspaceRoot;
+}
 function activeWorkspaceDesignSystem() {
   return validArtifacts().find((a) =>
     a.skill === 'claude-design-system' &&
@@ -2391,7 +2394,7 @@ function renderDesignSystemStage() {
     heroDesc.textContent = t('dsHeroDesc');
     primaryBtn.textContent = state.dsCreating ? t('creating') : t('dsInitBtn');
   }
-  primaryBtn.disabled = state.dsCreating;
+  primaryBtn.disabled = state.dsCreating || isReadOnlyHistory();
 
   document.querySelectorAll('[data-ds-tab]').forEach((btn) => {
     btn.setAttribute('aria-selected', btn.getAttribute('data-ds-tab') === state.dsTab ? 'true' : 'false');
@@ -2615,6 +2618,7 @@ function renderMissingTray() {
     tray.innerHTML = '';
     return;
   }
+  const readOnly = isReadOnlyHistory();
   tray.className = 'missing-tray';
   tray.innerHTML =
     '<div class="missing-bar">' +
@@ -2625,7 +2629,7 @@ function renderMissingTray() {
     '</div>' +
     '<div class="missing-bar-actions">' +
     '<button type="button" class="bda-btn" id="toggleMissingDetailsBtn">' + esc(state.showMissingDetails ? t('missingHide') : t('missingShow')) + '</button>' +
-    '<button type="button" class="bda-btn" data-danger="true" id="clearAllMissingBtn">' + esc(t('missingClearAll', { count: missing.length })) + '</button>' +
+    (readOnly ? '' : ('<button type="button" class="bda-btn" data-danger="true" id="clearAllMissingBtn">' + esc(t('missingClearAll', { count: missing.length })) + '</button>')) +
     '</div>' +
     '</div>' +
     (state.showMissingDetails
@@ -2639,7 +2643,7 @@ function renderMissingTray() {
             '<div class="missing-item-path" title="' + esc(it.root) + '">' + esc(it.root) + '</div>' +
             '</div>' +
             '</div>' +
-            '<button type="button" class="bda-btn" data-forget-root="' + esc(it.root) + '">' + esc(t('forget')) + '</button>' +
+            (readOnly ? '' : ('<button type="button" class="bda-btn" data-forget-root="' + esc(it.root) + '">' + esc(t('forget')) + '</button>')) +
             '</li>';
         }).join('') + '</ul>'
       : '');
@@ -2648,7 +2652,8 @@ function renderMissingTray() {
     state.showMissingDetails = !state.showMissingDetails;
     renderMissingTray();
   };
-  document.getElementById('clearAllMissingBtn').onclick = async () => {
+  const clearAllBtn = document.getElementById('clearAllMissingBtn');
+  if (clearAllBtn) clearAllBtn.onclick = async () => {
     const res = await api('/api/forget', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -2868,6 +2873,7 @@ function renderItems() {
     return;
   }
 
+  const readOnly = isReadOnlyHistory();
   if (isGrid) {
     container.innerHTML = '<ul class="bda-grid">' + items.map((it) => {
       const isOpening = state.openingRoot === it.root;
@@ -2881,7 +2887,7 @@ function renderItems() {
             : '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">')
         : '';
       return '<li class="bda-item" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" data-pinned="' + Boolean(it.pinned) + '" style="--bda-tint:' + (TINTS[it.skill] || '#007fa8') + '">' +
-        '<button type="button" class="bda-card" data-act="open" ' + (isOpening ? 'disabled' : '') + '>' +
+        '<button type="button" class="bda-card" data-act="open" ' + ((isOpening || readOnly) ? 'disabled' : '') + (readOnly ? ' data-readonly="true"' : '') + '>' +
         '<span class="bda-preview">' +
         '<span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
         previewEl +
@@ -2897,29 +2903,33 @@ function renderItems() {
         '</span>' +
         '</span>' +
         '</button>' +
-        '<div class="bda-actions">' +
-        '<button type="button" class="bda-act" data-act="more" title="' + esc(t('more')) + '">' + SVG_ICONS.more + '</button>' +
-        '<button type="button" class="bda-act" data-act="pin" data-on="' + Boolean(it.pinned) + '" title="' + esc(it.pinned ? t('unpin') : t('pin')) + '">' +
-        (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
-        '</button>' +
-        '</div>' +
+        (readOnly ? '' : (
+          '<div class="bda-actions">' +
+          '<button type="button" class="bda-act" data-act="more" title="' + esc(t('more')) + '">' + SVG_ICONS.more + '</button>' +
+          '<button type="button" class="bda-act" data-act="pin" data-on="' + Boolean(it.pinned) + '" title="' + esc(it.pinned ? t('unpin') : t('pin')) + '">' +
+          (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
+          '</button>' +
+          '</div>'
+        )) +
         '</li>';
     }).join('') + '</ul>';
   } else {
     container.innerHTML = '<ul class="bda-list">' + items.map((it) => {
       const isOpening = state.openingRoot === it.root;
       return '<li class="bda-item" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" style="--bda-tint:' + (TINTS[it.skill] || '#007fa8') + '">' +
-        '<button type="button" class="bda-row" data-act="open" ' + (isOpening ? 'disabled' : '') + '>' +
+        '<button type="button" class="bda-row" data-act="open" ' + ((isOpening || readOnly) ? 'disabled' : '') + (readOnly ? ' data-readonly="true"' : '') + '>' +
         '<span class="bda-glyph">' + (isOpening ? '<span class="bda-spinner"></span>' : typeIconSvg(it.skill, 18)) + '</span>' +
         '<span class="bda-name">' + esc(it.title) + '</span>' +
         '<span class="bda-meta">' + esc(localizedMeta(it) ? localizedMeta(it) + ' · ' : '') + esc(ago(it.openedAt)) + (it.note ? ' · ' + esc(it.note) : '') + '</span>' +
         '</button>' +
-        '<div class="bda-row-tools">' +
-        '<button type="button" class="bda-act" data-act="pin" data-on="' + Boolean(it.pinned) + '" title="' + esc(it.pinned ? t('unpin') : t('pin')) + '">' +
-        (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
-        '</button>' +
-        '<button type="button" class="bda-act" data-act="more" title="' + esc(t('more')) + '">' + SVG_ICONS.more + '</button>' +
-        '</div>' +
+        (readOnly ? '' : (
+          '<div class="bda-row-tools">' +
+          '<button type="button" class="bda-act" data-act="pin" data-on="' + Boolean(it.pinned) + '" title="' + esc(it.pinned ? t('unpin') : t('pin')) + '">' +
+          (it.pinned ? SVG_ICONS.pinFilled : SVG_ICONS.pin) +
+          '</button>' +
+          '<button type="button" class="bda-act" data-act="more" title="' + esc(t('more')) + '">' + SVG_ICONS.more + '</button>' +
+          '</div>'
+        )) +
         '</li>';
     }).join('') + '</ul>';
   }
@@ -2991,6 +3001,10 @@ function activateExampleStages(container) {
 }
 
 async function openItem(item) {
+  if (isReadOnlyHistory()) {
+    showToast(t('readonlyModeHint'));
+    return;
+  }
   state.openingRoot = item.root;
   renderItems();
   try {
@@ -3041,6 +3055,10 @@ window.addEventListener('popstate', () => {
 document.getElementById('backBtn').onclick = backToGallery;
 
 function showActionsMenu(item, anchorEl) {
+  if (isReadOnlyHistory()) {
+    showToast(t('readonlyModeHint'));
+    return;
+  }
   const rect = anchorEl.getBoundingClientRect();
   const layer = document.getElementById('menuLayer');
   anchorEl.closest('.bda-item')?.setAttribute('data-menu', 'true');
@@ -3534,6 +3552,10 @@ document.getElementById('container').onclick = async (e) => {
 
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
+  if (isReadOnlyHistory()) {
+    showToast(t('readonlyModeHint'));
+    return;
+  }
   const act = btn.getAttribute('data-act');
   if (act === 'open') await openItem(item);
   else if (act === 'pin') {

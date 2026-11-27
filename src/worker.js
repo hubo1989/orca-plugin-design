@@ -14,6 +14,7 @@ import {
   EXAMPLE_INDEX,
   resolveHostCli,
   resolveHostUserData,
+  resolveHostRuntimeDefaults,
   resolveProfileDb,
   computeGalleryBuildId,
 } from './skills-meta.mjs';
@@ -24,9 +25,10 @@ import {
   formatWorkspaceError,
 } from './workspace-guard.mjs';
 
-const APP_ID = 'orca-plugin-design';
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
+const HOST_RUNTIME = resolveHostRuntimeDefaults(pluginRoot);
+const APP_ID = process.env.ORCA_GALLERY_APP_ID?.trim() || HOST_RUNTIME.appId;
 
 function cleanTitle(raw) {
   if (typeof raw !== 'string') return '';
@@ -93,7 +95,7 @@ export default async function activate(orca) {
   const DESIGN_HOME = process.env.ORCA_DESIGN_HOME?.trim() || process.env.DSH_HOME?.trim() || path.join(HOST_USER_DATA, 'baoyu-design');
   const validateOpts = { pluginRoot, hostUserData: HOST_USER_DATA, designHome: DESIGN_HOME };
 
-  const GALLERY_PORT = Number(process.env.ORCA_GALLERY_PORT || process.env.PORT) || 3480;
+  const GALLERY_PORT = Number(process.env.ORCA_GALLERY_PORT || process.env.PORT) || HOST_RUNTIME.defaultPort;
   const GALLERY_URL = `http://127.0.0.1:${GALLERY_PORT}/`;
   const GALLERY_SCRIPT = process.env.ORCA_GALLERY_SCRIPT || path.join(pluginRoot, 'src', 'gallery-server.mjs');
   const STARTUP_TIMEOUT_MS = Number(process.env.ORCA_STARTUP_TIMEOUT_MS) || 8000;
@@ -162,7 +164,7 @@ export default async function activate(orca) {
     return isForbiddenWorkspacePath(target, validateOpts);
   }
 
-  const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
+  const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), HOST_RUNTIME.defaultStateFileName);
   // 点击时把实时焦点写入短时效 state；被拦截或未识别时同步清空快照，防止写串旧工作区。
   function writeState(root = workspaceRoot, name = workspaceName, errInfo = null) {
     const tmp = `${STATE_FILE}.${process.pid}.tmp`;
@@ -603,6 +605,7 @@ export default async function activate(orca) {
           ...process.env,
           PORT: String(GALLERY_PORT),
           ORCA_GALLERY_PORT: String(GALLERY_PORT),
+          ORCA_GALLERY_APP_ID: APP_ID,
           ORCA_CLI_COMMAND: ORCA_BIN,
           ORCA_USER_DATA: HOST_USER_DATA,
           ORCA_DESIGN_HOME: DESIGN_HOME,
@@ -642,7 +645,7 @@ export default async function activate(orca) {
             };
           }
           const h = await probeGalleryHealth(GALLERY_PORT, 300);
-          if (h.alive && h.mine) {
+          if (h.alive && h.mine && h.match) {
             cleanupChildListeners();
             child.unref();
             return { ok: true, warm: false, port: GALLERY_PORT, buildId: h.buildId };
@@ -729,7 +732,7 @@ export default async function activate(orca) {
     }, 30000);
     tabCacheTimer.unref?.();
   }
-  async function revealGalleryTab(pageId, label, lap, openRoot) {
+  async function revealGalleryTab(pageId, label, lap, openRoot, { cacheGallery = true } = {}) {
     const activated = openRoot ? await orcaTab(worktreeActivateArgs(openRoot), 8000) : null;
     if (activated?.err) {
       orca.log(`gallery worktree-activate failed: ${activated.err.message || activated.err}`);
@@ -752,8 +755,10 @@ export default async function activate(orca) {
       orca.log(`gallery tab not current after ${label}: expected ${switchedId}, got ${currentId || '(none)'}`);
       return null;
     }
-    cachedGalleryPageId = currentId;
-    cachedPageWsRoot = openRoot || '';
+    if (cacheGallery) {
+      cachedGalleryPageId = currentId;
+      cachedPageWsRoot = openRoot || '';
+    }
     return currentId;
   }
   async function createAndRevealGalleryTab(lap, openRoot, targetUrl = GALLERY_URL) {
@@ -982,14 +987,14 @@ export default async function activate(orca) {
       const tabs = !listed.err ? (orcaResult(parseOrcaJson(listed.stdout))?.tabs || []) : [];
       const existing = tabs.find((t) => String(t.url || '') === res.url);
       if (existing?.browserPageId) {
-        const pageId = await revealGalleryTab(existing.browserPageId, 'editor-switch', () => {}, openRoot);
+        const pageId = await revealGalleryTab(existing.browserPageId, 'editor-switch', () => {}, openRoot, { cacheGallery: false });
         return { ok: true, url: res.url, pageId: pageId || existing.browserPageId, reused: true, mode: 'workspace-tab' };
       }
       const created = await orcaTabCreate(res.url, openRoot || undefined);
       if (created.error || !created.pageId) {
         return { ok: false, error: created.error || 'failed to create editor tab' };
       }
-      const pageId = await revealGalleryTab(created.pageId, 'editor-switch(created)', () => {}, openRoot);
+      const pageId = await revealGalleryTab(created.pageId, 'editor-switch(created)', () => {}, openRoot, { cacheGallery: false });
       return { ok: true, url: res.url, pageId: pageId || created.pageId, reused: false, mode: 'workspace-tab' };
     });
 

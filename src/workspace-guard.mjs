@@ -392,11 +392,8 @@ export async function resolveOrcaWorkspace({
     return { ...res, source };
   };
 
-  // L1: Profile DB activeWorktreeId（live 模式结合 readContext 实时焦点校核）
+  // L1: live 模式下先用 readContext 实时焦点校核已打开本机工作区，避免旧的远程 Profile DB 误拦截刚切回的本地工作区
   const fromProfile = readProfileActiveWorkspace(profileDbPath, execFileSyncFn);
-  if (fromProfile?.isRemote) {
-    return accept(fromProfile.rawPath, { isRemote: true }, 'L1-profile-db');
-  }
   if (openedWorkspaces.length > 0) {
     if (live && ctx) {
       const wHost = focusedFromHostContext(ctx, openedWorkspaces);
@@ -404,12 +401,17 @@ export async function resolveOrcaWorkspace({
         return accept(wHost.path, wHost, 'L1-host-context');
       }
     }
+    if (fromProfile?.isRemote) {
+      return accept(fromProfile.rawPath, { isRemote: true }, 'L1-profile-db');
+    }
     if (fromProfile?.rawPath) {
       const known = openedWorkspaces.find((w) => w.path === fromProfile.rawPath);
       if (known) {
         return accept(known.path, known, 'L1-profile-db');
       }
     }
+  } else if (fromProfile?.isRemote) {
+    return accept(fromProfile.rawPath, { isRemote: true }, 'L1-profile-db');
   } else if (fromProfile?.rawPath) {
     return accept(fromProfile.rawPath, {}, 'L1-profile-db');
   }

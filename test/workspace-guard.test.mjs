@@ -190,6 +190,21 @@ test('validateWorkspacePath & isForbiddenWorkspacePath: blocks plugin dirs, syml
   assert.equal(validTmpRes.realWorkspaceRoot, fs.realpathSync.native(wsA));
 });
 
+test('resolveOrcaWorkspace: live local host focus overrides stale remote Profile DB row', async () => {
+  const remoteDb = path.join(tmpRoot, 'profile-remote.db');
+  makeProfileDb(remoteDb, 'ssh-env::my-host::/remote/project');
+  const res = await resolveOrcaWorkspace({
+    live: true,
+    listWorkspaces: async () => [{ id: 'w-a', path: wsA, name: 'ws-a', branch: 'feat-a', kind: 'local' }],
+    readContext: async () => ({ branch: 'feat-a', displayName: 'ws-a', terminals: [] }),
+    profileDbPath: remoteDb,
+    validateOptions,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.workspaceRoot, wsA);
+  assert.equal(res.source, 'L1-host-context');
+});
+
 test.after(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });

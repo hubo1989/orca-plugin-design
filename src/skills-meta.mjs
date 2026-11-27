@@ -16,6 +16,24 @@ export function detectHostAppFolder(pluginRoot = __defaultPluginRoot) {
   return 'orca';
 }
 
+export function resolveHostRuntimeDefaults(pluginRoot = __defaultPluginRoot) {
+  const hostApp = detectHostAppFolder(pluginRoot);
+  if (hostApp === 'LKL-PMStudio') {
+    return {
+      hostApp,
+      appId: 'lkl-pmstudio-plugin-design',
+      defaultPort: 3482,
+      defaultStateFileName: 'prototype-studio-pmstudio-state.json',
+    };
+  }
+  return {
+    hostApp,
+    appId: 'orca-plugin-design',
+    defaultPort: 3480,
+    defaultStateFileName: 'prototype-studio-state.json',
+  };
+}
+
 export function resolveHostUserData(pluginRoot = __defaultPluginRoot) {
   const envSet = process.env.ORCA_USER_DATA?.trim();
   if (envSet) return path.resolve(envSet);

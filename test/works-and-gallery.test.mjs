@@ -231,6 +231,45 @@ test('AC-9: dashboard/motion reject empty scaffold, support /api/start {skill} +
   assert.equal(thumbRes.status, 404);
 });
 
+test('Review fixes: mixed-folder undo survives second deletion, stale unresolved focus stays locked, and read-only mutations return 403', async () => {
+  // 1. Mixed-folder undo metadata survives deleting a second project
+  const mixed1 = await post('/api/create', { skill: 'claude-design', name: 'mixed-undo-1' });
+  fs.writeFileSync(path.join(mixed1.json.root, 'keep.txt'), 'keep me');
+  const pure2 = await post('/api/create', { skill: 'claude-slides', name: 'pure-undo-2' });
+
+  const delMixed1 = await post('/api/delete', { root: mixed1.json.root });
+  assert.equal(delMixed1.json.ok, true);
+  assert.equal(delMixed1.json.moved, false);
+  const delPure2 = await post('/api/delete', { root: pure2.json.root });
+  assert.equal(delPure2.json.ok, true);
+
+  const restoreMixed1 = await post('/api/restore', { id: delMixed1.json.trash });
+  assert.equal(restoreMixed1.json.ok, true, 'mixed-folder undo survives subsequent delete');
+
+  // 2. Stale unresolved NO_WORKSPACE state does not revive stale PROFILE_DB and blocks HTTP mutations
+  const staleErrTime = Date.now() - 60_000;
+  fs.writeFileSync(stateFile, JSON.stringify({
+    workspaceRoot: '',
+    workspaceName: '',
+    errorCode: 'NO_WORKSPACE',
+    errorMessage: 'no workspace',
+    updatedAt: staleErrTime,
+  }));
+  const listRes = await (await fetch(`${base}/api/list`)).json();
+  assert.equal(listRes.workspaceRoot, '');
+  assert.equal(listRes.workspaceError?.code, 'NO_WORKSPACE');
+
+  const delBlocked = await post('/api/delete', { root: mixed1.json.root });
+  assert.equal(delBlocked.status, 403);
+  assert.equal(delBlocked.json.code, 'NO_WORKSPACE');
+  const updBlocked = await post('/api/update', { root: mixed1.json.root, pinned: true });
+  assert.equal(updBlocked.status, 403);
+  assert.equal(updBlocked.json.code, 'NO_WORKSPACE');
+
+  // Restore valid workspace state for cleanup
+  fs.writeFileSync(stateFile, JSON.stringify({ workspaceRoot: wsDir, workspaceName: 'workspace', updatedAt: Date.now() }));
+});
+
 test.after(async () => {
   await new Promise((resolve) => server.close(resolve));
   fs.rmSync(tmpDir, { recursive: true, force: true });

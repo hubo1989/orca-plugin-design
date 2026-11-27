@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
 
 import { buildGalleryPageHtml } from '../src/gallery-ui.mjs';
+import { resolveHostRuntimeDefaults } from '../src/skills-meta.mjs';
 import activateWorker from '../src/worker.js';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
@@ -370,6 +371,60 @@ else console.log(JSON.stringify({ ok: true, result: {} }));
     assert.equal(resOrca.ok, true);
     assert.equal(resOrca.pageId, 'p1');
     h2.dispose();
+
+    // 3. Host runtime isolation defaults (Orca vs LKL-PMStudio)
+    const orcaDefaults = resolveHostRuntimeDefaults('/Users/test/Library/Application Support/orca/plugins/hubo.prototype-studio');
+    const pmsDefaults = resolveHostRuntimeDefaults('/Users/test/Library/Application Support/LKL-PMStudio/plugins/hubo.prototype-studio');
+    assert.equal(orcaDefaults.defaultPort, 3480);
+    assert.equal(pmsDefaults.defaultPort, 3482);
+    assert.notEqual(orcaDefaults.appId, pmsDefaults.appId);
+    assert.notEqual(orcaDefaults.defaultStateFileName, pmsDefaults.defaultStateFileName);
+
+    // 4. studio.editor.open must NOT pollute cachedGalleryPageId
+    const edCli = path.join(tmpDir, 'mock-ed-cli.mjs');
+    const lastPageFile = path.join(tmpDir, 'last-page.txt');
+    fs.writeFileSync(edCli, `#!/usr/bin/env node
+import fs from 'node:fs';
+const argv = process.argv.slice(2);
+const lastFile = ${JSON.stringify(lastPageFile)};
+if (argv[1] === 'list') console.log(JSON.stringify({ ok: true, result: { tabs: [{ browserPageId: 'editor-tab-1', url: 'http://127.0.0.1:4720/' }, { browserPageId: 'gallery-tab-1', url: 'http://127.0.0.1:${process.env.ORCA_GALLERY_PORT}/' }] } }));
+else if (argv[1] === 'create') {
+  const url = argv[argv.indexOf('--url') + 1] || '';
+  const pid = url.includes(':${process.env.ORCA_GALLERY_PORT}/') ? 'gallery-tab-1' : 'editor-tab-1';
+  console.log(JSON.stringify({ ok: true, result: { browserPageId: pid } }));
+}
+else if (argv[1] === 'switch') {
+  const pid = argv[argv.indexOf('--page') + 1];
+  fs.writeFileSync(lastFile, pid);
+  console.log(JSON.stringify({ ok: true, result: { browserPageId: pid } }));
+}
+else if (argv[1] === 'current') {
+  const pid = fs.existsSync(lastFile) ? fs.readFileSync(lastFile, 'utf8').trim() : 'gallery-tab-1';
+  console.log(JSON.stringify({ ok: true, result: { tab: { browserPageId: pid } } }));
+}
+else console.log(JSON.stringify({ ok: true, result: {} }));
+`, { mode: 0o755 });
+    process.env.ORCA_CLI_COMMAND = edCli;
+    const panels = new Map();
+    const h3 = await activateWorker({
+      log: () => {},
+      commands: Object.freeze({ register: () => {} }),
+      panels: Object.freeze({ handle: (id, fn) => panels.set(id, fn) }),
+      events: Object.freeze({ on: () => {} }),
+      host: Object.freeze({
+        has: () => false,
+        call: async (m) => (m === 'workspace.list' ? { workspaces: [{ path: wsDir, name: 'ws', branch: 'main', kind: 'local' }] } : {}),
+      }),
+    });
+    const createdEd = await panels.get('studio.skill.create')({ skill: 'claude-design', name: 'ed-sample', wsPath: wsDir });
+    assert.equal(createdEd.ok, true);
+    const edRes = await panels.get('studio.editor.open')({ skill: 'claude-design', root: createdEd.root });
+    assert.equal(edRes.ok, true, edRes.error);
+    await panels.get('studio.skill.stop')({ skill: 'claude-design', root: createdEd.root }).catch(() => {});
+    const tabRes = await panels.get('studio.gallery.openTab')();
+    assert.equal(tabRes.ok, true, tabRes.error);
+    assert.equal(tabRes.pageId, 'gallery-tab-1');
+    h3.dispose();
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

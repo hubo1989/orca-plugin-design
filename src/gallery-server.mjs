@@ -26,6 +26,7 @@ import {
   EXAMPLE_INDEX,
   resolveHostCli,
   resolveHostUserData,
+  resolveHostRuntimeDefaults,
   resolveProfileDb,
   GALLERY_BUILD_ID,
 } from './skills-meta.mjs';
@@ -44,10 +45,12 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 const HOST_USER_DATA = resolveHostUserData(pluginRoot);
-const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
+const HOST_RUNTIME = resolveHostRuntimeDefaults(pluginRoot);
+const APP_ID = process.env.ORCA_GALLERY_APP_ID?.trim() || HOST_RUNTIME.appId;
+const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), HOST_RUNTIME.defaultStateFileName);
 const BAOYU_SKILLS_DIR = path.join(pluginRoot, 'vendor', 'baoyu-design', 'skills');
 const ORCA_BIN = resolveHostCli(pluginRoot);
-const PORT = Number(process.env.ORCA_GALLERY_PORT || process.env.PORT) || 3480;
+const PORT = Number(process.env.ORCA_GALLERY_PORT || process.env.PORT) || HOST_RUNTIME.defaultPort;
 
 const OFFICIAL_EXAMPLES = BUILTIN_EXAMPLES
   .filter((item) => Object.hasOwn(SKILL_BY_ID, item.skill))
@@ -435,9 +438,19 @@ function trashArtifact(record) {
   const id = `${folderHash(record.root)}-${Date.now()}`;
   const entry = path.join(trashDir(), id);
   try {
+    const now = Date.now();
     for (const name of fs.readdirSync(trashDir())) {
-      if (TRASH_ID.test(name) && !fs.existsSync(path.join(trashDir(), name, 'folder'))) {
-        fs.rmSync(path.join(trashDir(), name), { recursive: true, force: true });
+      if (!TRASH_ID.test(name)) continue;
+      const entryDir = path.join(trashDir(), name);
+      const hasFolder = fs.existsSync(path.join(entryDir, 'folder'));
+      const hasDismissed = fs.existsSync(path.join(entryDir, '.dismissed'));
+      if (!hasFolder && !hasDismissed) {
+        fs.rmSync(entryDir, { recursive: true, force: true });
+      } else if (hasDismissed) {
+        const ts = Number(name.split('-').pop());
+        if (Number.isFinite(ts) && now - ts > 3600_000) {
+          fs.rmSync(entryDir, { recursive: true, force: true });
+        }
       }
     }
   } catch {}
@@ -448,7 +461,8 @@ function trashArtifact(record) {
   if (moved) {
     moveFolder(record.root, p);
   } else {
-    // 混合目录绝不删改任何文件，改为写入 dismissed/ 标记防止扫盘复活
+    // 混合目录绝不删改任何文件，改为写入 dismissed/ 标记防止扫盘复活，并保留撤销元数据窗口
+    fs.writeFileSync(path.join(entry, '.dismissed'), '');
     markDismissed(record.root, record.skill);
   }
   removeArtifactIndex(record.root);
@@ -485,23 +499,8 @@ async function renameArtifact(skill, root, title) {
   }
   const at = TITLES[skill];
   if (!at) throw new Error(`no title to change for ${skill}`);
-  if (skill === 'claude-dashboard' || skill === 'claude-motion') {
-    const metaPath = path.join(root, at[0]);
-    if (fs.existsSync(metaPath)) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        meta[at[1]] = title;
-        writeWhole(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
-      } catch {}
-    }
-  } else {
-    const file = path.join(root, at[0]);
-    if (fs.existsSync(file)) {
-      const idx = JSON.parse(fs.readFileSync(file, 'utf8'));
-      writeWhole(file, `${JSON.stringify({ ...idx, [at[1]]: title }, null, 2)}\n`);
-    }
-  }
 
+  // 先执行磁盘目录重命名（失败则未改写任何文件内容），成功后再更新 JSON title
   let finalRoot = root;
   const parentDir = path.dirname(root);
   const oldBase = path.basename(root);
@@ -519,6 +518,28 @@ async function renameArtifact(skill, root, title) {
       ownedEditorRoots.delete(safeRealPath(root));
       finalRoot = nextRoot;
     }
+  }
+
+  try {
+    if (skill === 'claude-dashboard' || skill === 'claude-motion') {
+      const metaPath = path.join(finalRoot, at[0]);
+      if (fs.existsSync(metaPath)) {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        meta[at[1]] = title;
+        writeWhole(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+      }
+    } else {
+      const file = path.join(finalRoot, at[0]);
+      if (fs.existsSync(file)) {
+        const idx = JSON.parse(fs.readFileSync(file, 'utf8'));
+        writeWhole(file, `${JSON.stringify({ ...idx, [at[1]]: title }, null, 2)}\n`);
+      }
+    }
+  } catch (err) {
+    if (finalRoot !== root) {
+      try { moveFolder(finalRoot, root); } catch {}
+    }
+    throw err;
   }
 
   const oldRec = findArtifact(root);
@@ -567,10 +588,13 @@ function readState() {
   let explicit = {};
   try { explicit = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
 
-  const fresh = Number.isFinite(Number(explicit.updatedAt)) &&
-    Date.now() - Number(explicit.updatedAt) < STATE_TTL_MS;
+  const updatedAt = Number(explicit.updatedAt);
+  const fresh = Number.isFinite(updatedAt) && Date.now() - updatedAt < STATE_TTL_MS;
+  let profileMtimeMs = 0;
+  try { profileMtimeMs = fs.statSync(PROFILE_DB).mtimeMs; } catch {}
+  const profileNewer = Number.isFinite(updatedAt) ? profileMtimeMs > updatedAt : true;
 
-  if (fresh && explicit.errorCode && !explicit.workspaceRoot) {
+  if (explicit.errorCode && !explicit.workspaceRoot && (fresh || !profileNewer)) {
     return {
       workspaceRoot: '',
       realWorkspaceRoot: '',
@@ -1118,7 +1142,7 @@ const server = http.createServer((req, res) => {
       const activePort = (addr && typeof addr === 'object' && addr.port) ? addr.port : PORT;
       return finish({
         ok: true,
-        app: 'orca-plugin-design',
+        app: APP_ID,
         buildId: GALLERY_BUILD_ID,
         pid: process.pid,
         port: activePort,
@@ -1174,6 +1198,24 @@ const server = http.createServer((req, res) => {
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed;
     } catch {}
     const skill = input.skill || '', root = input.root || '';
+
+    const WORKSPACE_MUTATION_ROUTES = new Set([
+      '/api/register', '/api/open', '/api/open-url',
+      '/api/forget', '/api/forget-missing', '/api/update',
+      '/api/delete', '/api/restore', '/api/rename',
+      '/api/stop', '/api/restart-editor',
+    ]);
+    if (WORKSPACE_MUTATION_ROUTES.has(url.pathname)) {
+      const st = readState();
+      if (!st.workspaceRoot) {
+        res.statusCode = 403;
+        return finish({
+          ok: false,
+          code: st.errorCode || 'NO_WORKSPACE',
+          error: st.errorMessage || formatWorkspaceError('NO_WORKSPACE'),
+        });
+      }
+    }
 
     if (url.pathname === '/api/register') {
       const result = registerArtifact(input);
