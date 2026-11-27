@@ -1,4 +1,14 @@
 // Lakala-Design-Plugin · 工作区画廊界面模块（双语目录、工作室布局样式与交互脚本）
+import {
+  SKILLS,
+  SKILL_BY_ID,
+  TINTS,
+  RECIPES,
+  LAKALA_TOKENS,
+  BUILTIN_EXAMPLES,
+  BUILTIN_BY_ID,
+  EXAMPLE_TEMPLATES,
+} from './skills-meta.mjs';
 
 const SKILL_EN_COPY = {
   'claude-slides': [
@@ -198,6 +208,20 @@ export function createGalleryStrings(skills, recipes, examples) {
       dsScaleRadius: '圆角梯度',
       dsOpenAllComps: '全屏检视全部 5 套组件与品牌手册 ↗',
       dsModalSubtitle: '切换上方组件标签可实时检视 HTML 交互卡片，点击「启用至当前工作区」即可在编辑器中修改全部 Token 与文档。',
+      sendAgentPrompt: '发送给 Agent 对话',
+      promptSent: '✓ 已发送给 Agent 对话',
+      openInTab: '标签页打开 ↗',
+      openedInWorkspaceTab: '✓ 已在当前工作区打开编辑器标签页',
+      viewAllHistoryReadonly: '查看全部历史作品（只读）',
+      readonlyModeHint: '当前为只读历史视图（工作区不可写入，新建与编辑已锁定）',
+      skeletonLoadingTitle: '正在启动设计工作台…',
+      skeletonLoadingDesc: '正在连接本地项目库服务并加载当前工作区作品',
+      startTimeoutTitle: '项目库本地服务启动超时',
+      startTimeoutDesc: '项目库本地服务启动超时或未响应（端口 {port}），请点击重试或检查 Orca 插件日志。',
+      portOccupiedTitle: '项目库端口已被其他程序占用',
+      portOccupiedDesc: '项目库端口 {port} 已被其他程序占用，请释放该端口或通过环境变量 PORT 指定空闲端口后重试。',
+      retryStart: '重试启动',
+      checkHealthCmd: '自查命令：curl -sS http://127.0.0.1:{port}/api/health',
     },
     en: {
       works: 'Design Studio',
@@ -365,6 +389,20 @@ export function createGalleryStrings(skills, recipes, examples) {
       dsScaleRadius: 'Corner Radii',
       dsOpenAllComps: 'Inspect all 5 live component cards & brand book ↗',
       dsModalSubtitle: 'Switch tabs above to inspect live component cards, or initialize in your workspace to customize tokens.',
+      sendAgentPrompt: 'Send to Agent Chat',
+      promptSent: '✓ Sent prompt to Agent chat',
+      openInTab: 'Open in Tab ↗',
+      openedInWorkspaceTab: '✓ Opened editor tab in current workspace',
+      viewAllHistoryReadonly: 'View All History (Read-only)',
+      readonlyModeHint: 'Read-only history view (workspace not writable; create and edit locked)',
+      skeletonLoadingTitle: 'Starting Design Studio…',
+      skeletonLoadingDesc: 'Connecting to local gallery server and loading workspace projects',
+      startTimeoutTitle: 'Gallery Server Startup Timed Out',
+      startTimeoutDesc: 'Gallery server startup timed out or did not respond on port {port}. Retry or check Orca plugin logs.',
+      portOccupiedTitle: 'Gallery Port Occupied',
+      portOccupiedDesc: 'Gallery server port {port} is occupied by another program. Free the port or set PORT to an available port and try again.',
+      retryStart: 'Retry Start',
+      checkHealthCmd: 'Self-check: curl -sS http://127.0.0.1:{port}/api/health',
     },
   };
 
@@ -1983,6 +2021,123 @@ button, input { font: inherit; }
   gap: 8px;
 }
 
+.bda-ws-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l1));
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, var(--studio-surface));
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+.bda-ws-banner-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 280px;
+}
+.bda-ws-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bda-skeleton-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.bda-skeleton-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--studio-surface);
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+}
+.bda-skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  gap: 14px;
+}
+.bda-skeleton-card {
+  border-radius: 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--studio-surface);
+  overflow: hidden;
+}
+.bda-skeleton-thumb,
+.bda-skeleton-line {
+  background: linear-gradient(90deg, var(--dsw-alias-bg-skeleton) 25%, color-mix(in srgb, var(--studio-surface) 55%, var(--dsw-alias-bg-skeleton)) 50%, var(--dsw-alias-bg-skeleton) 75%);
+  background-size: 200% 100%;
+  animation: bda-shimmer 1.4s ease-in-out infinite;
+}
+.bda-skeleton-thumb {
+  width: 100%;
+  aspect-ratio: 16/10;
+}
+.bda-skeleton-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bda-skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+}
+.bda-skeleton-line.short { width: 55%; height: 10px; }
+@keyframes bda-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.bda-error-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 20px 22px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 35%, var(--dsw-alias-border-l1));
+  background: var(--studio-surface);
+}
+.bda-error-card h3 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--dsw-alias-label-primary);
+}
+.bda-error-card p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary);
+}
+.bda-error-cmd {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--studio-surface-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  user-select: all;
+}
+.bda-shadow-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #fff;
+}
+
 #editorView {
   display: flex;
   flex-direction: column;
@@ -2075,10 +2230,19 @@ function safeJson(v) {
 }
 
 const GALLERY_CLIENT_SCRIPT = String.raw`
+const IS_PLUGIN_PAGE = typeof window !== 'undefined'
+  && typeof window.orca?.plugin?.request === 'function';
+const MEM_PREFS = Object.create(null);
+
 function readPreference(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
+  try {
+    const v = localStorage.getItem(key);
+    if (v !== null) return v;
+  } catch {}
+  return Object.hasOwn(MEM_PREFS, key) ? MEM_PREFS[key] : null;
 }
 function writePreference(key, value) {
+  MEM_PREFS[key] = String(value);
   try { localStorage.setItem(key, value); } catch {}
 }
 
@@ -2216,6 +2380,10 @@ const state = {
   artifacts: [],
   workspaceName: '',
   workspaceRoot: '',
+  workspaceError: null,
+  bootStatus: (!IS_PLUGIN_PAGE && typeof location !== 'undefined' && location.hash === '#opening') ? 'opening' : 'ready',
+  bootErrorCode: '',
+  bootErrorMessage: '',
   scope: 'workspace',
   search: '',
   viewMode: readPreference('ps_view_mode') || 'grid',
@@ -2233,8 +2401,44 @@ const state = {
   showMissingDetails: false,
 };
 
+const pluginThumbCache = new Map();
+
+function sanitizeScopedHtml(rawHtml) {
+  return String(rawHtml || '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<script\b[^>]*\/\s*>/gi, '');
+}
+
+function mountScopedHtml(hostEl, rawHtml, designW, designH) {
+  if (!hostEl) return;
+  const w = hostEl.clientWidth || 320;
+  const scale = Math.min(1, w / designW);
+  if (designH) hostEl.style.height = Math.round(designH * scale) + 'px';
+  const cleaned = sanitizeScopedHtml(rawHtml);
+  if (typeof hostEl.attachShadow === 'function') {
+    const root = hostEl.shadowRoot || hostEl.attachShadow({ mode: 'open' });
+    root.innerHTML =
+      '<style>:host{display:block;overflow:hidden;position:relative}*{box-sizing:border-box}</style>' +
+      '<div style="width:' + designW + 'px;height:' + (designH || 750) + 'px;transform:scale(' + scale + ');transform-origin:0 0;overflow:hidden;background:#fff">' +
+      cleaned + '</div>';
+  } else {
+    hostEl.innerHTML = '<div style="width:' + designW + 'px;transform:scale(' + scale + ');transform-origin:0 0;overflow:hidden">' + cleaned + '</div>';
+  }
+}
+
 async function api(route, opts) {
-  const r = await fetch(route, opts);
+  if (IS_PLUGIN_PAGE) {
+    const method = (opts && opts.method) || 'GET';
+    let body;
+    if (opts && typeof opts.body === 'string' && opts.body) {
+      try { body = JSON.parse(opts.body); } catch { body = undefined; }
+    } else if (opts && opts.body && typeof opts.body === 'object') {
+      body = opts.body;
+    }
+    return window.orca.plugin.request('studio.gallery.api', { route, method, body });
+  }
+  const headers = { 'X-Orca-Design-Client': '1', ...((opts && opts.headers) || {}) };
+  const r = await fetch(route, { ...(opts || {}), headers });
   return r.json();
 }
 
@@ -2304,8 +2508,7 @@ function missingArtifacts() {
 function activeWorkspaceDesignSystem() {
   return validArtifacts().find((a) =>
     a.skill === 'claude-design-system' &&
-    a.inCurrentWorkspace &&
-    (/lakala|拉卡拉/i.test(a.title) || /lakala-design-system/i.test(a.root))
+    a.inCurrentWorkspace
   ) || null;
 }
 
@@ -2548,7 +2751,9 @@ function openDsInspectorDialog(initialComp = 'Cover') {
       ).join('') +
       '</div></div>' +
       '<p>' + esc(t('dsModalSubtitle')) + '</p>' +
-      '<div class="bda-example-preview" id="dsModalPreview"><iframe sandbox="" title="' + esc(current) + '"></iframe></div>' +
+      '<div class="bda-example-preview" id="dsModalPreview">' +
+      (IS_PLUGIN_PAGE ? '<div class="bda-shadow-stage" id="dsShadowStage"></div>' : '<iframe sandbox="" title="' + esc(current) + '"></iframe>') +
+      '</div>' +
       '<div class="bda-dialog-actions">' +
       '<button type="button" class="bda-btn" id="dsModalClose">' + esc(t('close')) + '</button>' +
       '<button type="button" class="bda-btn" data-primary="true" id="dsModalOpenBtn">' +
@@ -2568,13 +2773,20 @@ function openDsInspectorDialog(initialComp = 'Cover') {
       renderModal();
     };
     const preview = document.getElementById('dsModalPreview');
-    const frame = preview.querySelector('iframe');
-    const scale = Math.min(1, (preview.clientWidth || 860) / 1120);
-    frame.style.width = '1120px';
-    frame.style.height = '680px';
-    preview.style.height = Math.round(680 * scale) + 'px';
-    frame.style.transform = 'scale(' + scale + ')';
-    frame.srcdoc = DS_COMPONENTS[current] || '';
+    if (IS_PLUGIN_PAGE) {
+      const stage = document.getElementById('dsShadowStage');
+      mountScopedHtml(stage, DS_COMPONENTS[current] || '', 1120, 680);
+      const scale = Math.min(1, (preview.clientWidth || 860) / 1120);
+      preview.style.height = Math.round(680 * scale) + 'px';
+    } else {
+      const frame = preview.querySelector('iframe');
+      const scale = Math.min(1, (preview.clientWidth || 860) / 1120);
+      frame.style.width = '1120px';
+      frame.style.height = '680px';
+      preview.style.height = Math.round(680 * scale) + 'px';
+      frame.style.transform = 'scale(' + scale + ')';
+      frame.srcdoc = DS_COMPONENTS[current] || '';
+    }
   };
   renderModal();
 }
@@ -2745,14 +2957,107 @@ function renderScopeSwitch() {
   };
 }
 
+function renderWorkspaceBanner() {
+  const banner = document.getElementById('wsBanner');
+  if (!banner) return;
+  const err = state.workspaceError;
+  if (!err || state.workspaceRoot) {
+    banner.className = 'bda-ws-banner hidden';
+    banner.innerHTML = '';
+    return;
+  }
+  const hasHistory = validArtifacts().length > 0;
+  banner.className = 'bda-ws-banner';
+  banner.setAttribute('data-error-code', err.code || 'NO_WORKSPACE');
+  banner.innerHTML =
+    '<div class="bda-ws-banner-copy">' + SVG_ICONS.info + '<span>' +
+    esc(err.message || t('railNoWorkspace')) +
+    (state.scope === 'all' && hasHistory ? (' · ' + esc(t('readonlyModeHint'))) : '') +
+    '</span></div>' +
+    '<div class="bda-ws-banner-actions">' +
+    (hasHistory && state.scope !== 'all'
+      ? ('<button type="button" class="bda-btn" id="viewAllHistoryBtn">' + esc(t('viewAllHistoryReadonly')) + '</button>')
+      : '') +
+    '</div>';
+  const viewBtn = document.getElementById('viewAllHistoryBtn');
+  if (viewBtn) {
+    viewBtn.onclick = () => {
+      state.scope = 'all';
+      renderItems();
+    };
+  }
+}
+
+function hydratePluginThumbs(container) {
+  if (!IS_PLUGIN_PAGE || !container) return;
+  container.querySelectorAll('img[data-plugin-thumb-root]').forEach(async (img) => {
+    const root = img.getAttribute('data-plugin-thumb-root');
+    if (!root) return;
+    if (pluginThumbCache.has(root)) {
+      const cached = pluginThumbCache.get(root);
+      if (cached) {
+        img.src = cached;
+        img.classList.remove('hidden');
+      }
+      return;
+    }
+    try {
+      const res = await window.orca.plugin.request('studio.gallery.thumb', { root });
+      if (res && res.ok && res.dataUrl) {
+        pluginThumbCache.set(root, res.dataUrl);
+        if (img.isConnected) {
+          img.src = res.dataUrl;
+          img.classList.remove('hidden');
+        }
+      } else {
+        pluginThumbCache.set(root, '');
+      }
+    } catch {}
+  });
+}
+
 function renderItems() {
   syncSectionOrder();
   renderRailSkills();
   renderDesignSystemStage();
   renderMissingTray();
   renderScopeSwitch();
+  renderWorkspaceBanner();
 
   const container = document.getElementById('container');
+  if (state.bootStatus === 'opening') {
+    container.innerHTML =
+      '<div class="bda-skeleton-wrap" data-orca-design-skeleton="true">' +
+      '<div class="bda-skeleton-head"><span class="bda-spinner"></span><span>' +
+      esc(t('skeletonLoadingTitle')) + ' · ' + esc(t('skeletonLoadingDesc')) +
+      '</span></div>' +
+      '<div class="bda-skeleton-grid">' +
+      Array.from({ length: 6 }, () =>
+        '<div class="bda-skeleton-card"><div class="bda-skeleton-thumb"></div><div class="bda-skeleton-body"><div class="bda-skeleton-line"></div><div class="bda-skeleton-line short"></div></div></div>'
+      ).join('') +
+      '</div></div>';
+    return;
+  }
+
+  if (state.bootStatus === 'timeout' || state.bootStatus === 'port_occupied') {
+    const isOccupied = state.bootStatus === 'port_occupied';
+    const port = (typeof location !== 'undefined' && location.port) ? location.port : '3480';
+    const code = isOccupied ? 'PORT_OCCUPIED_BY_OTHER' : 'START_TIMEOUT';
+    const title = isOccupied ? t('portOccupiedTitle') : t('startTimeoutTitle');
+    const desc = state.bootErrorMessage || (isOccupied ? t('portOccupiedDesc', { port }) : t('startTimeoutDesc', { port }));
+    container.innerHTML =
+      '<div class="bda-error-card" data-error-code="' + code + '">' +
+      '<h3>' + esc(title) + '</h3>' +
+      '<p>' + esc(desc) + '</p>' +
+      '<div class="bda-error-cmd">' + esc(t('checkHealthCmd', { port })) + '</div>' +
+      '<div class="bda-error-actions">' +
+      '<button type="button" class="bda-btn" data-primary="true" id="retryBootBtn">' + esc(t('retryStart')) + '</button>' +
+      '</div></div>';
+    const retryBtn = document.getElementById('retryBootBtn');
+    if (retryBtn) retryBtn.onclick = () => bootWithRetry();
+    return;
+  }
+
   const items = getSortedList();
   const isGrid = state.viewMode === 'grid';
   document.getElementById('viewModeIcon').innerHTML = isGrid ? SVG_ICONS.list : SVG_ICONS.grid;
@@ -2807,12 +3112,20 @@ function renderItems() {
     container.innerHTML = '<ul class="bda-grid">' + items.map((it) => {
       const isOpening = state.openingRoot === it.root;
       const scopeLabel = state.workspaceRoot ? (it.inCurrentWorkspace ? t('currentWsBadge') : t('otherWsBadge')) : '';
+      const previewEl = IS_PLUGIN_PAGE
+        ? ''
+        : (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="' + esc(t('projectPreview')) + '"></iframe>' : '');
+      const thumbEl = it.thumb
+        ? (IS_PLUGIN_PAGE
+            ? '<img class="bda-thumb hidden" data-plugin-thumb-root="' + esc(it.root) + '" alt="">'
+            : '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">')
+        : '';
       return '<li class="bda-item" data-root="' + esc(it.root) + '" data-skill="' + esc(it.skill) + '" data-pinned="' + Boolean(it.pinned) + '" style="--bda-tint:' + (TINTS[it.skill] || '#007fa8') + '">' +
         '<button type="button" class="bda-card" data-act="open" ' + (isOpening ? 'disabled' : '') + '>' +
         '<span class="bda-preview">' +
         '<span class="bda-sheet">' + drawnHtml(it.skill, it.title) + '</span>' +
-        (it.preview ? '<iframe class="bda-live" data-src="/api/preview?skill=' + encodeURIComponent(it.skill) + '&root=' + encodeURIComponent(it.root) + '" tabindex="-1" sandbox="allow-scripts" title="' + esc(t('projectPreview')) + '"></iframe>' : '') +
-        (it.thumb ? '<img class="bda-thumb" src="/api/thumb?root=' + encodeURIComponent(it.root) + '" alt="" onerror="this.remove()">' : '') +
+        previewEl +
+        thumbEl +
         (scopeLabel ? '<span class="bda-scope-tag" data-current="' + Boolean(it.inCurrentWorkspace) + '">' + esc(scopeLabel) + '</span>' : '') +
         (isOpening ? ('<span class="bda-busy"><span class="bda-spinner"></span>' + esc(t('opening')) + '</span>') : '') +
         '</span>' +
@@ -2850,7 +3163,8 @@ function renderItems() {
         '</li>';
     }).join('') + '</ul>';
   }
-  activateLivePreviews(container);
+  if (IS_PLUGIN_PAGE) hydratePluginThumbs(container);
+  else activateLivePreviews(container);
 }
 
 function rescaleStageFrames() {
@@ -2902,6 +3216,11 @@ function activateExampleStages(container) {
     const exId = stage.getAttribute('data-stage-example');
     const ex = OFFICIAL_EXAMPLES.find((x) => x.id === exId);
     if (!ex || !ex.html) return;
+    if (IS_PLUGIN_PAGE) {
+      const host = stage.querySelector('.bda-shadow-stage');
+      if (host) mountScopedHtml(host, ex.html, 1200, 750);
+      return;
+    }
     const f = stage.querySelector('iframe');
     if (!f) return;
     const w = stage.clientWidth || 320;
@@ -2915,6 +3234,15 @@ async function openItem(item) {
   state.openingRoot = item.root;
   renderItems();
   try {
+    if (IS_PLUGIN_PAGE) {
+      const res = await window.orca.plugin.request('studio.editor.open', { skill: item.skill, root: item.root });
+      if (!res || !res.ok) {
+        showToast(t('cannotOpen') + ((res && res.error) || t('unknownError')));
+        return;
+      }
+      showToast(t('openedInWorkspaceTab'));
+      return;
+    }
     const res = await api('/api/open', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -2926,7 +3254,7 @@ async function openItem(item) {
     }
     const frame = document.getElementById('frame');
     document.getElementById('editorTitle').textContent = item.title + ' · ' + skillText(item.skill, 'name');
-    frame.src = res.url;
+    if (frame) frame.src = res.url;
     document.getElementById('popBtn').onclick = () => window.open(res.url, '_blank');
     document.getElementById('listView').classList.add('hidden');
     document.getElementById('editorView').classList.remove('hidden');
@@ -2942,7 +3270,8 @@ async function openItem(item) {
 function backToGallery() {
   document.getElementById('editorView').classList.add('hidden');
   document.getElementById('listView').classList.remove('hidden');
-  document.getElementById('frame').src = 'about:blank';
+  const frame = document.getElementById('frame');
+  if (frame) frame.src = 'about:blank';
   if (location.hash) history.replaceState({}, '', location.pathname + location.search);
   reload();
 }
@@ -3070,7 +3399,9 @@ function openCreateDialog(skillId) {
     '<div class="bda-dialog-actions">' +
     '<button type="button" class="bda-btn" id="createCancel">' + esc(t('cancel')) + '</button>' +
     '<button type="button" class="bda-btn" id="copyPromptBtn">' + esc(t('copyPrompt')) + '</button>' +
-    (canScaffold ? ('<button type="button" class="bda-btn" data-primary="true" id="createScaffoldBtn">' + esc(t('createBlank')) + '</button>') : '') +
+    (canScaffold
+      ? ('<button type="button" class="bda-btn" data-primary="true" id="createScaffoldBtn">' + esc(t('createBlank')) + '</button>')
+      : ('<button type="button" class="bda-btn" data-primary="true" id="sendAgentPromptBtn">' + esc(t('sendAgentPrompt')) + '</button>')) +
     '</div>'
   );
   document.getElementById('createCancel').onclick = closeDialog;
@@ -3087,6 +3418,40 @@ function openCreateDialog(skillId) {
     document.getElementById('createScaffoldBtn').onclick = async () => {
       closeDialog();
       await instantiateTemplate(skillId, true);
+    };
+  } else {
+    document.getElementById('sendAgentPromptBtn').onclick = async () => {
+      const btn = document.getElementById('sendAgentPromptBtn');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await api('/api/start', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ skill: s.id }),
+        });
+        if (res && res.ok) {
+          closeDialog();
+          showToast(t('promptSent'));
+        } else {
+          const draft = (res && res.starter) || skillText(s.id, 'prompt');
+          closeDialog();
+          try {
+            await navigator.clipboard.writeText(draft);
+            showToast(t('draftCopied') + ((res && res.error) || ''));
+          } catch {
+            showToast(t('copyFailed') + draft);
+          }
+        }
+      } catch (err) {
+        const draft = skillText(s.id, 'prompt');
+        closeDialog();
+        try {
+          await navigator.clipboard.writeText(draft);
+          showToast(t('draftCopied') + err.message);
+        } catch {
+          showToast(t('copyFailed') + draft);
+        }
+      }
     };
   }
 }
@@ -3184,7 +3549,9 @@ function openExamplePreviewModal(example) {
     '<h2>' + esc(exampleText(example, 'title')) + '</h2>' +
     '<p>' + esc(exampleText(example, 'desc')) + '</p>' +
     (example.html
-      ? '<div class="bda-example-preview" id="examplePreview"><iframe sandbox="" title="' + esc(t('previewTitle', { title: exampleText(example, 'title') })) + '"></iframe></div>'
+      ? '<div class="bda-example-preview" id="examplePreview">' +
+        (IS_PLUGIN_PAGE ? '<div class="bda-shadow-stage" id="exampleShadowStage"></div>' : '<iframe sandbox="" title="' + esc(t('previewTitle', { title: exampleText(example, 'title') })) + '"></iframe>') +
+        '</div>'
       : '<div class="bda-example-skeleton">' + drawnHtml(example.skill, exampleText(example, 'title')) + '<p>' + esc(t('exampleSkeleton')) + '</p></div>') +
     '<p>' + esc(exampleText(example, 'points')) + '</p>' +
     '<div class="bda-dialog-actions">' +
@@ -3200,11 +3567,18 @@ function openExamplePreviewModal(example) {
   };
   if (example.html) {
     const preview = document.getElementById('examplePreview');
-    const frame = preview.querySelector('iframe');
-    const scale = Math.min(1, (preview.clientWidth || 860) / 1200);
-    preview.style.height = Math.round(750 * scale) + 'px';
-    frame.style.transform = 'scale(' + scale + ')';
-    frame.srcdoc = example.html;
+    if (IS_PLUGIN_PAGE) {
+      const stage = document.getElementById('exampleShadowStage');
+      mountScopedHtml(stage, example.html, 1200, 750);
+      const scale = Math.min(1, (preview.clientWidth || 860) / 1200);
+      preview.style.height = Math.round(750 * scale) + 'px';
+    } else {
+      const frame = preview.querySelector('iframe');
+      const scale = Math.min(1, (preview.clientWidth || 860) / 1200);
+      preview.style.height = Math.round(750 * scale) + 'px';
+      frame.style.transform = 'scale(' + scale + ')';
+      frame.srcdoc = example.html;
+    }
   }
 }
 
@@ -3214,7 +3588,7 @@ function renderExamples() {
     '<li class="bda-example">' +
     '<div class="bda-example-stage" data-stage-example="' + esc(example.id) + '" data-act="preview" data-example="' + esc(example.id) + '">' +
     (example.label ? '<span class="bda-example-label">' + esc(example.label) + '</span>' : '') +
-    '<iframe sandbox="" tabindex="-1" title="' + esc(exampleText(example, 'title')) + '"></iframe>' +
+    (IS_PLUGIN_PAGE ? '<div class="bda-shadow-stage"></div>' : '<iframe sandbox="" tabindex="-1" title="' + esc(exampleText(example, 'title')) + '"></iframe>') +
     '</div>' +
     '<div class="bda-example-body">' +
     '<span class="bda-example-skill">' + typeIconSvg(example.skill, 15) + esc(skillText(example.skill, 'name')) + '</span>' +
@@ -3482,23 +3856,109 @@ mainScroll.addEventListener('scroll', () => {
   });
 }, { passive: true });
 
-async function reload() {
+async function reload(quiet = false) {
   try {
     const res = await api('/api/list');
-    if (res.ok) {
+    if (res && res.ok) {
       state.artifacts = res.artifacts || [];
       state.workspaceName = res.workspaceName || '';
       state.workspaceRoot = res.workspaceRoot || '';
+      state.workspaceError = res.workspaceError || null;
+      state.bootStatus = 'ready';
+      state.bootErrorCode = '';
+      state.bootErrorMessage = '';
       updateWorkspaceBadge();
       renderItems();
+      return true;
+    }
+    if (res && res.code === 'PORT_OCCUPIED_BY_OTHER') {
+      state.bootStatus = 'port_occupied';
+      state.bootErrorCode = res.code;
+      state.bootErrorMessage = res.error || '';
+      renderItems();
+      return false;
     }
   } catch (err) {
-    showToast(t('loadFailed') + err.message);
+    if (!quiet) showToast(t('loadFailed') + err.message);
+  }
+  return false;
+}
+
+let bootRunId = 0;
+async function bootWithRetry() {
+  const myRun = ++bootRunId;
+  if (IS_PLUGIN_PAGE || (typeof location !== 'undefined' && location.hash !== '#opening')) {
+    await reload();
+    return;
+  }
+  state.bootStatus = 'opening';
+  state.bootErrorCode = '';
+  state.bootErrorMessage = '';
+  renderItems();
+
+  const maxWaitMs = (typeof window !== 'undefined' && Number(window.__ORCA_BOOT_TIMEOUT_MS__)) || 8000;
+  const pollMs = (typeof window !== 'undefined' && Number(window.__ORCA_BOOT_POLL_MS__)) || 500;
+  const deadline = Date.now() + maxWaitMs;
+
+  while (myRun === bootRunId) {
+    try {
+      const hr = await fetch('/api/health', { headers: { 'X-Orca-Design-Client': '1' } });
+      const h = await hr.json().catch(() => null);
+      if (h && h.app && h.app !== 'orca-plugin-design') {
+        state.bootStatus = 'port_occupied';
+        state.bootErrorCode = 'PORT_OCCUPIED_BY_OTHER';
+        state.bootErrorMessage = '';
+        renderItems();
+        return;
+      }
+    } catch {}
+
+    const ok = await reload(true);
+    if (myRun !== bootRunId) return;
+    if (ok) {
+      if (typeof location !== 'undefined' && location.hash === '#opening') {
+        history.replaceState({}, '', location.pathname + location.search);
+      }
+      return;
+    }
+    if (Date.now() >= deadline) {
+      state.bootStatus = 'timeout';
+      state.bootErrorCode = 'START_TIMEOUT';
+      state.bootErrorMessage = '';
+      renderItems();
+      return;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
+if (IS_PLUGIN_PAGE) {
+  const editorView = document.getElementById('editorView');
+  if (editorView) editorView.remove();
+  const openInTabBtn = document.getElementById('openInTabBtn');
+  if (openInTabBtn) {
+    openInTabBtn.classList.remove('hidden');
+    openInTabBtn.onclick = () => window.orca.plugin.request('studio.gallery.openTab', {});
+  }
+  if (typeof window.orca?.on === 'function') {
+    window.orca.on('workspace.changed', () => { reload(); });
+    window.orca.on('theme', (payload) => {
+      const scheme = payload && payload.colorScheme;
+      if (scheme === 'dark' || scheme === 'light') {
+        document.documentElement.dataset.hostScheme = scheme;
+        if (!readPreference('ps-scheme-manual')) {
+          document.documentElement.dataset.scheme = scheme;
+          state.dsTheme = scheme;
+          renderSchemeButton();
+          renderDesignSystemStage();
+        }
+      }
+    });
   }
 }
 
 renderAll();
-reload();
+bootWithRetry();
 `;
 
 export function buildGalleryHtml({
@@ -3618,8 +4078,11 @@ try {
           <button type="button" class="bda-tool" id="viewModeBtn" data-i18n-title="switchView" title="${text('switchView')}" data-i18n-label="switchView" aria-label="${text('switchView')}">
             <svg id="viewModeIcon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"></svg>
           </button>
+          <button type="button" class="bda-btn hidden" id="openInTabBtn" data-i18n="openInTab">${text('openInTab')}</button>
         </div>
       </header>
+
+      <div id="wsBanner" class="bda-ws-banner hidden"></div>
 
       <section class="ds-stage" id="sec-ds">
         <div class="ds-hero">
@@ -3732,4 +4195,47 @@ ${GALLERY_CLIENT_SCRIPT}
 </script>
 </body>
 </html>`;
+}
+
+const DEFAULT_OFFICIAL_EXAMPLES = BUILTIN_EXAMPLES
+  .filter((item) => Object.hasOwn(SKILL_BY_ID, item.skill))
+  .map((item) => ({
+    id: item.id,
+    skill: item.skill,
+    title: item.title,
+    titleEn: item.titleEn,
+    desc: item.desc,
+    descEn: item.descEn,
+    points: item.points,
+    pointsEn: item.pointsEn,
+    label: item.label || '',
+    featured: Boolean(item.featured),
+    html: item.html || '',
+  }));
+
+const DEFAULT_DS_COMPONENTS = Object.fromEntries(
+  ['Cover', 'Button', 'Form', 'Card', 'Navigation']
+    .map((name) => {
+      const raw = BUILTIN_BY_ID['claude-design-system']?.files?.[`project/components/${name}/preview.html`];
+      if (!raw) return null;
+      return [name, raw.replace(/^<!--\s*@dsCard[^>]*-->\s*\r?\n?/, '')];
+    })
+    .filter(Boolean),
+);
+
+const DEFAULT_TEMPLATES_MAP = Object.fromEntries(Object.keys(EXAMPLE_TEMPLATES).map((id) => [id, true]));
+
+export function buildGalleryPageHtml(overrides = {}) {
+  return buildGalleryHtml({
+    requestedLang: overrides.requestedLang || 'zh',
+    requestedScheme: overrides.requestedScheme || '',
+    resolvedHostScheme: overrides.resolvedHostScheme || '',
+    skills: overrides.skills || SKILLS,
+    tints: overrides.tints || TINTS,
+    recipes: overrides.recipes || RECIPES,
+    examples: overrides.examples || DEFAULT_OFFICIAL_EXAMPLES,
+    templatesMap: overrides.templatesMap || DEFAULT_TEMPLATES_MAP,
+    lakalaTokens: overrides.lakalaTokens || LAKALA_TOKENS,
+    dsComponents: overrides.dsComponents || DEFAULT_DS_COMPONENTS,
+  });
 }
