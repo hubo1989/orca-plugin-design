@@ -14,7 +14,7 @@ export function guardPost(req) {
   if (origin !== undefined) {
     try {
       const o = new URL(origin);
-      if (o.host !== req.headers.host) return 403;
+      if (!req.headers.host || o.host !== req.headers.host) return 403;
     } catch {
       return 403;
     }

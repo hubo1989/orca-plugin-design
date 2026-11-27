@@ -82,20 +82,27 @@ test('gallery lifecycle: create -> scan -> update -> trash -> restore', async ()
   assert.equal(item.title, 'demo-canvas');
   assert.equal(item.pinned, false);
 
-  // 4. 更新置顶和重命名
+  // 4. 更新置顶和重命名（同步改磁盘目录名与 JSON title）
   const record = findArtifact(item.root);
   assert.ok(record);
   record.pinned = true;
   writeRecord(record);
-  await renameArtifact('claude-design', item.root, 'Renamed Canvas');
+  const renamed = await renameArtifact('claude-design', item.root, 'Renamed Canvas');
+  assert.equal(renamed.title, 'Renamed Canvas');
+  assert.equal(path.basename(renamed.root), 'Renamed-Canvas');
+  assert.equal(fs.existsSync(item.root), false, '旧目录已物理迁出');
+  assert.equal(fs.existsSync(renamed.root), true, '新目录已物理落盘');
 
   const afterUpdate = listArtifactsViews();
   assert.equal(afterUpdate.artifacts.length, 1);
   assert.equal(afterUpdate.artifacts[0].pinned, true);
   assert.equal(afterUpdate.artifacts[0].title, 'Renamed Canvas');
+  assert.equal(afterUpdate.artifacts[0].root, renamed.root);
 
   // 5. 软删除作品到 trash/
-  const trashed = trashArtifact(record);
+  const updatedRecord = findArtifact(renamed.root);
+  assert.ok(updatedRecord);
+  const trashed = trashArtifact(updatedRecord);
   assert.ok(trashed.trash);
   assert.equal(trashed.moved, true);
 
@@ -104,11 +111,12 @@ test('gallery lifecycle: create -> scan -> update -> trash -> restore', async ()
 
   // 6. 从 trash/ 恢复作品
   const restored = restoreArtifact(trashed.trash);
-  assert.equal(restored.root, item.root);
+  assert.equal(restored.root, renamed.root);
 
   const afterRestore = listArtifactsViews();
   assert.equal(afterRestore.artifacts.length, 1);
   assert.equal(afterRestore.artifacts[0].title, 'Renamed Canvas');
+  assert.equal(afterRestore.artifacts[0].root, renamed.root);
 });
 
 test('built-in Lakala design system and curated templates pass artifact checks and resolve cover previews', async () => {

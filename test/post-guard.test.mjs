@@ -35,3 +35,7 @@ test('guardPost: 非 POST 方法 405', () => {
 test('guardPost: content-type 带 charset 参数仍放行', () => {
   assert.equal(guardPost(req({ 'content-type': 'application/json; charset=utf-8', host: '127.0.0.1:3480' })), 0);
 });
+
+test('guardPost: Origin 存在但缺少 Host 头拒绝 403', () => {
+  assert.equal(guardPost(req({ 'content-type': 'application/json', origin: 'http://127.0.0.1:3480' })), 403);
+});
