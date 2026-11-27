@@ -26,9 +26,23 @@
     }
   ],
   "engines": {
-    "orca": ">=1.4.248"
+    "orca": ">=1.4.274"
   },
   "contributes": {
+    "pages": [
+      {
+        "id": "gallery",
+        "title": "Design",
+        "icon": "layers",
+        "entry": "src/gallery-page.html",
+        "ui": "html",
+        "sidebar": {
+          "placement": "primary",
+          "order": 30
+        },
+        "layout": "full-page"
+      }
+    ],
     "commands": [
       {
         "id": "prototype.skill.claude-design",
