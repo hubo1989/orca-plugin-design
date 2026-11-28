@@ -36,6 +36,8 @@ manifest = json.loads((out / "orca-plugin.json").read_text())
 
 required = [
     manifest["main"],
+    "src/panel.tsx",
+    "src/workspace-resolver.mjs",
     "src/columns-store.mjs",
     "src/export-render.mjs",
     "src/extra-types.mjs",
@@ -117,6 +119,8 @@ EOF
 
 echo "== validate =="
 "$ORCA" plugin validate "$OUT" --json
+echo "== check =="
+"$ORCA" plugin check "$OUT" --json
 echo "== inspect =="
 "$ORCA" plugin inspect "$OUT" --json | python3 -I -c 'import json,sys; d=json.load(sys.stdin); r=d.get("result",{}); print("pluginKey:", r.get("plugin",{}).get("pluginKey")); print("contentHash:", r.get("contentHash")); print("valid:", r.get("valid")); sys.exit(0 if r.get("valid") is True else 1)'
 du -sh "$OUT"
