@@ -73,11 +73,25 @@ import {
   voiceProfilePath,
 } from './voice-store.mjs';
 
+import {
+  resolveOrcaBin,
+  computeGalleryBuildId,
+  parseProfileWorkspace,
+} from './workspace-resolver.mjs';
+
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 const STATE_FILE = process.env.ORCA_STATE_FILE || path.join(os.tmpdir(), 'prototype-studio-state.json');
-const ORCA_BIN = process.env.ORCA_CLI_COMMAND || '/Applications/Orca.app/Contents/Resources/bin/orca';
+const ORCA_BIN = resolveOrcaBin();
 const PORT = Number(process.env.PORT) || 3480;
+const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(pluginRoot, 'orca-plugin.json'), 'utf8')).version || '0.3.0';
+  } catch {
+    return '0.3.0';
+  }
+})();
+const BUILD_ID = computeGalleryBuildId(pluginRoot);
 const EXAMPLES_INDEX = JSON.parse(fs.readFileSync(new URL('./examples.json', import.meta.url), 'utf8'));
 const OFFICIAL_EXAMPLES = [...new Set([...Object.keys(EXAMPLES_INDEX), ...Object.keys(EXAMPLE_TEMPLATES)])]
   .map((id) => normalizeTypeId(id))
@@ -468,18 +482,36 @@ function hostScheme() {
 function readState() {
   let explicit = {};
   try { explicit = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
-  if (validWsRoot(explicit.workspaceRoot)) return explicit;
-  try {
-    const out = execFileSync('sqlite3', [PROFILE_DB,
-      "SELECT payload FROM profile_state_documents WHERE domain='workspaceSession'"],
-      { timeout: 3000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    const ws = JSON.parse(out);
-    const id = ws.activeWorktreeId || '';
-    const p = id.includes('::') ? id.split('::').pop() : '';
-    if (validWsRoot(p)) {
-      return { workspaceRoot: p, workspaceName: p.split('/').filter(Boolean).pop() || '' };
+
+  // 测试显式指定 ORCA_STATE_FILE 时保持原有直读逻辑以兼容全部单测
+  if (process.env.ORCA_STATE_FILE) {
+    if (validWsRoot(explicit.workspaceRoot)) return explicit;
+    const parsed = parseProfileWorkspace(PROFILE_DB, execFileSync);
+    if (parsed && !parsed.isRemote && validWsRoot(parsed.path)) {
+      return { workspaceRoot: parsed.path, workspaceName: parsed.name || path.basename(parsed.path) };
     }
-  } catch {}
+    return { workspaceRoot: '', workspaceName: '' };
+  }
+
+  const updatedAt = Number(explicit.updatedAt || 0);
+  const stateFresh = updatedAt > 0 && (Date.now() - updatedAt < 600_000);
+  let profileDbMtime = 0;
+  try { profileDbMtime = fs.statSync(PROFILE_DB).mtimeMs; } catch {}
+
+  if (stateFresh && (!profileDbMtime || updatedAt >= profileDbMtime)) {
+    if (explicit.isRemote) return { workspaceRoot: '', workspaceName: '' };
+    if (validWsRoot(explicit.workspaceRoot)) return explicit;
+  }
+
+  const parsed = parseProfileWorkspace(PROFILE_DB, execFileSync);
+  if (parsed?.isRemote) {
+    return { workspaceRoot: '', workspaceName: '' };
+  }
+  if (parsed && validWsRoot(parsed.path)) {
+    return { workspaceRoot: parsed.path, workspaceName: parsed.name || path.basename(parsed.path) };
+  }
+
+  if (stateFresh && validWsRoot(explicit.workspaceRoot)) return explicit;
   return { workspaceRoot: '', workspaceName: '' };
 }
 
@@ -4400,7 +4432,7 @@ const server = http.createServer(async (req, res) => {
   ];
   const allowedPost = [
     '/api/open', '/api/open-url', '/api/update', '/api/delete', '/api/restore',
-    '/api/create', '/api/rename', '/api/stop', '/api/restart', '/api/restart-editor',
+    '/api/create', '/api/rename', '/api/stop', '/api/shutdown', '/api/restart', '/api/restart-editor',
     '/api/start', '/api/register', '/api/forget',
     '/api/columns/create', '/api/columns/update', '/api/columns/dissolve',
     '/api/columns/assign', '/api/columns/remove-item',
@@ -4416,7 +4448,15 @@ const server = http.createServer(async (req, res) => {
       res.statusCode = 404; return res.end('{}');
     }
     if (url.pathname === '/') return res.end(galleryHtml(url.searchParams.get('lang'), url.searchParams.get('scheme')));
-    if (url.pathname === '/api/health') return res.end(JSON.stringify({ ok: true }));
+    if (url.pathname === '/api/health') {
+      return res.end(JSON.stringify({
+        ok: true,
+        app: 'orca-plugin-design',
+        version: PKG_VERSION,
+        buildId: BUILD_ID,
+        pid: process.pid,
+      }));
+    }
     if (url.pathname === '/vendor/harness-embed.mjs') {
       res.setHeader('content-type', 'application/javascript; charset=utf-8');
       return res.end(fs.readFileSync(path.join(pluginRoot, 'src', 'vendor', 'harness-embed.mjs')));
@@ -4763,6 +4803,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/stop' || url.pathname === '/api/restart-editor') {
       return finish({ ok: true });
+    }
+    if (url.pathname === '/api/shutdown') {
+      finish({ ok: true, shuttingDown: true });
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 300).unref();
+      return;
     }
     if (url.pathname === '/api/restart') {
       finish({ ok: true, restarting: true });

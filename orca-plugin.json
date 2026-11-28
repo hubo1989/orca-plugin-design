@@ -58,24 +58,23 @@
       {
         "id": "prototype.gallery",
         "title": "Open Design Gallery",
-        "when": "workspace"
+        "when": "global"
       }
     ],
-    "statusBarItems": [
+    "panels": [
       {
-        "id": "gallery",
-        "text": "Design",
+        "id": "studio",
+        "title": "Orca-Design",
         "icon": "layers",
-        "tone": "accent",
-        "tooltip": "Orca-Design · 打开设计项目库",
-        "command": "prototype.gallery"
+        "entry": "src/panel.tsx",
+        "ui": "components"
       }
     ],
     "keybindings": [
       {
         "command": "prototype.gallery",
         "key": "Mod+Alt+P",
-        "when": "workspace"
+        "when": "global"
       }
     ],
     "events": [
